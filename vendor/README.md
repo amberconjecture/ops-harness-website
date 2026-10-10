@@ -30,4 +30,8 @@ pnpm --dir packages/shared/release-contract pack --pack-destination /path/to/ops
 
 ## 运营打点协议
 
-`dsh-ops-tracking-0.1.0-<sha256前12位>.tgz` 来自产品仓库 `packages/shared/logger-tracking` 的 pnpm pack。来源、工作区输入及 SHA-256 见 [tracking.json](tracking.json)。官网仅导入 `@dsh-ops/tracking/contracts`，不加载 Host/Cordis。更新时在产品仓库完成 build/test 后 pack 到 vendor，以内容哈希命名新制品（避免同路径缓存旧包），更新 package.json、输入/制品哈希，执行官网 `pnpm install --no-frozen-lockfile` 与 check/build。当前为明确标记的 sourceWorkingTree 联调制品，正式发布应从审核后的源码重新生成。
+`dsh-ops-tracking-contract-0.1.0-f76676da1bb6.tgz` 来自产品仓库 `packages/shared/tracking-contract` 的 pnpm pack。它只依赖精确版本 zod，官网从 `@dsh-ops/tracking-contract` 根入口读取事件契约，不安装或加载 DSH、Cordis、Host 插件及其私有依赖。契约目录版本 4，事件/批次 schemaVersion 仍为 1，支持 WeLink 姓名、部门及资料查询时间。产品原 `@dsh-ops/tracking/contracts` 仅转导出此唯一契约源码以保持兼容。
+
+来源、工作区输入及 SHA-256 见 [tracking.json](tracking.json)。按产品升级计划 K16，契约变更时必须构建纯包，不得再打包包含私有 workspace 依赖的完整 tracking 插件。更新时在产品仓库完成纯包 build/test 后 pack 到 vendor，以内容哈希命名新制品，更新 package.json、来源清单与锁文件，执行官网 `pnpm install --no-frozen-lockfile` 和 check/build。先重启官网，再更新终端；旧服务端严格校验会拒收新增字段。
+
+当前为明确标记的 sourceWorkingTree 联调制品，正式发布应从审核后的源码重新生成。旧 `dsh-ops-tracking-*` 制品仅保留审计，不再被依赖引用；不得覆盖已有制品路径。

@@ -4,13 +4,83 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
+import { DatabaseSync } from 'node:sqlite'
 import { TrackingDatabase, type Installation } from '../server/tracking/database.js'
-import type { TrackingEvent } from '@dsh-ops/tracking/contracts'
+import type { TrackingEvent } from '@dsh-ops/tracking-contract'
 const now = Date.parse('2026-09-20T06:00:00Z')
 const q = { from: '2026-09-20', to: '2026-09-20', environment: 'all', offset: 0, limit: 50 }
 function event(i: Installation, employeeId?: string, extra: Partial<TrackingEvent> = {}): TrackingEvent {
   return { schemaVersion: 1, eventVersion: 1, eventId: randomUUID(), eventName: 'operation.accepted', module: 'tool-market', feature: 'tools', action: 'tool.add', occurredAt: new Date(now).toISOString(), installationId: i.installationId, runtimeId: randomUUID(), sequence: 1, initiator: 'user', interactionId: randomUUID(), operationId: randomUUID(), platform: 'darwin', appVersion: '0.1.0', environment: i.environment, properties: {}, ...(employeeId ? { employee: { source: 'welink', employeeId } } : {}), ...extra }
 }
+const profile = { chineseName: '示例同事', departmentName: '示例集团 / 终端事业部 / 体验研究组', deptL1Name: '终端事业部', deptName: '体验研究组', profileUpdatedAt: '2026-09-20T05:00:00.000Z' }
+
+test('employee profiles enrich all personal views without changing attribution or accepting stale overwrites', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'tracking-profile-')); const db = new TrackingDatabase(root, () => now)
+  const installation: Installation = { tenantId: 'development', installationId: randomUUID(), environment: 'development' }
+  const employee = { source: 'welink' as const, employeeId: 'qa-profile', ...profile }
+  const send = (value: typeof employee | TrackingEvent['employee']) => db.ingest(installation, [event(installation, undefined, { employee: value })])
+  try {
+    assert.equal(send(employee).acceptedIds.length, 1)
+    const first = (db.query('users', q) as any).rows[0]
+    for (const [key, value] of Object.entries(profile)) assert.equal(first[key], value)
+    assert.equal(first.displayName, profile.chineseName); assert.equal(first.account, employee.employeeId)
+    const otherInstallation = { ...installation, installationId: randomUUID(), environment: 'test' as const }
+    assert.equal(db.ingest(otherInstallation, [event(otherInstallation, undefined, { employee: { ...employee, chineseName: '旧姓名', deptName: '旧部门', profileUpdatedAt: '2026-09-19T05:00:00.000Z' } })]).acceptedIds.length, 1)
+    send({ source: 'welink', employeeId: employee.employeeId })
+    send({ source: 'welink', employeeId: employee.employeeId, profileUpdatedAt: '2026-09-21T05:00:00.000Z' })
+    send({ source: 'welink', employeeId: employee.employeeId, chineseName: '缺时间的姓名' })
+    send({ source: 'welink', employeeId: employee.employeeId, deptName: '新体验研究组', profileUpdatedAt: '2026-09-20T05:30:00.000Z' })
+    for (const kind of ['users', 'rankings', 'operations']) {
+      const row = (db.query(kind, { ...q, userId: first.userId }) as any).rows[0]
+      assert.equal(row.displayName, profile.chineseName); assert.equal(row.chineseName, profile.chineseName)
+      assert.equal(row.departmentName, profile.departmentName); assert.equal(row.deptL1Name, profile.deptL1Name)
+      assert.equal(row.deptName, '新体验研究组'); assert.equal(row.profileUpdatedAt, '2026-09-20T05:30:00.000Z')
+    }
+    assert.equal((db.query('users', q) as any).total, 1)
+    assert.equal((db.query('overview', q) as any).activeUsers, 1)
+    assert.equal((db.query('users', { ...q, search: profile.chineseName }) as any).total, 1)
+  } finally { db.close(); await rm(root, { recursive: true, force: true }) }
+})
+
+test('frozen operation profiles continue to match and rejected conflicts cannot overwrite a profile', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'tracking-profile-operation-')); const db = new TrackingDatabase(root, () => now)
+  const installation: Installation = { tenantId: 'development', installationId: randomUUID(), environment: 'development' }
+  const employee = { source: 'welink' as const, employeeId: 'qa-profile', ...profile }
+  try {
+    const accepted = event(installation, undefined, { employee })
+    db.ingest(installation, [accepted])
+    const changed = { ...employee, chineseName: '不应保存', profileUpdatedAt: '2026-09-20T05:50:00.000Z' }
+    const terminal = { ...accepted, eventId: randomUUID(), eventName: 'operation.finished' as const, outcome: 'succeeded' as const, changed: true }
+    assert.equal(db.ingest(installation, [{ ...terminal, employee: changed }]).rejected[0]?.code, 'OPERATION_CONTEXT_CONFLICT')
+    assert.equal((db.query('users', q) as any).rows[0].chineseName, profile.chineseName)
+    assert.equal(db.ingest(installation, [terminal]).acceptedIds.length, 1)
+    assert.equal(db.ingest(installation, [terminal]).duplicateIds.length, 1)
+    assert.equal((db.query('overview', q) as any).successes, 1)
+    const laterAccepted = event(installation, undefined, { employee })
+    const earlyTerminal = { ...laterAccepted, eventId: randomUUID(), eventName: 'operation.finished' as const, outcome: 'succeeded' as const, changed: true }
+    assert.equal(db.ingest(installation, [earlyTerminal]).acceptedIds.length, 1)
+    assert.equal(db.ingest(installation, [laterAccepted]).acceptedIds.length, 1)
+    assert.equal((db.query('overview', q) as any).successes, 2)
+  } finally { db.close(); await rm(root, { recursive: true, force: true }) }
+})
+
+test('schema v2 migration retains users and facts, initializes empty profiles, and reopens idempotently', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'tracking-profile-migration-'))
+  const installation: Installation = { tenantId: 'development', installationId: randomUUID(), environment: 'development' }
+  let db = new TrackingDatabase(root, () => now)
+  try {
+    db.ingest(installation, [event(installation, 'legacy-user')]); db.close()
+    const legacy = new DatabaseSync(path.join(root, 'analytics.sqlite'))
+    legacy.exec('ALTER TABLE users DROP COLUMN chinese_name; ALTER TABLE users DROP COLUMN department_name; ALTER TABLE users DROP COLUMN dept_l1_name; ALTER TABLE users DROP COLUMN dept_name; ALTER TABLE users DROP COLUMN profile_updated_at; DELETE FROM schema_version WHERE version=3;')
+    legacy.close()
+    db = new TrackingDatabase(root, () => now)
+    const row = (db.query('users', q) as any).rows[0]
+    assert.equal(row.account, 'legacy-user'); assert.equal(row.displayName, 'legacy-user'); assert.equal(row.deptName, null); assert.equal(row.interactions, 1)
+    db.close(); db = new TrackingDatabase(root, () => now)
+    assert.equal((db.query('users', q) as any).total, 1)
+    db.identity(installation, { issuer: 'legacy-sso', subject: 'old-user', displayName: '兼容用户', expiresAt: now + 60_000 })
+  } finally { db.close(); await rm(root, { recursive: true, force: true }) }
+})
 test('user search and sorting run before pagination and preserve aggregate counts', async () => {
   const root=await mkdtemp(path.join(tmpdir(),'tracking-user-search-'));const db=new TrackingDatabase(root,()=>now)
   const i:Installation={tenantId:'development',installationId:randomUUID(),environment:'development'}

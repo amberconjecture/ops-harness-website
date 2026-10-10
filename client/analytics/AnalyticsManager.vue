@@ -3,10 +3,11 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ApiError, guideApi } from '../guide-api'
 import Icon from '../Icon.vue'
 import WebsiteDialog from '../WebsiteDialog.vue'
+import DepartmentLabel from './DepartmentLabel.vue'
 import { analyticsViews, type AnalyticsView } from '../admin-route'
 import { userSortKeys, type UserSortKey } from '../../shared/analytics'
 import { analyticsQuery, readAnalyticsState, today, validDates, validEnvironment, type AnalyticsState } from './state'
-import { columnsFor, defaultColumns, format, fullDate, healthReasons, number, type Row, type Result } from './presentation'
+import { columnsFor, defaultColumns, restoreColumns, format, fullDate, healthReasons, number, type Row, type Result } from './presentation'
 
 const props = defineProps<{ view: AnalyticsView; query: string }>()
 const emit = defineEmits<{ error: [error: unknown]; navigate: [view: AnalyticsView, query: string, replace?: boolean] }>()
@@ -79,11 +80,12 @@ function apply() {
 }
 function applySearch(){navigate({search:search.value.trim(),page:1})}
 function sortBy(key:string){if(props.view!=='users'||!userSortKeys.includes(key as UserSortKey))return;navigate({sort:key as UserSortKey,direction:state.value.sort===key&&state.value.direction==='desc'?'asc':'desc',page:1})}
-function ariaSort(key:string):'ascending'|'descending'|'none'|undefined{return props.view==='users'?state.value.sort===key?state.value.direction==='asc'?'ascending':'descending':'none':undefined}
+function sortable(key:string){return props.view==='users'&&userSortKeys.includes(key as UserSortKey)}
+function ariaSort(key:string):'ascending'|'descending'|'none'|undefined{return sortable(key)?state.value.sort===key?state.value.direction==='asc'?'ascending':'descending':'none':undefined}
 function inspect(row:Row){returnTo.value={view:props.view,query:props.query,scroll:tableRegion.value?.scrollTop??0};navigate({user:String(row.userId),page:1,search:'',sort:''},'operations')}
 function returnUsers(){const previous=returnTo.value;returnTo.value=undefined;if(previous){restoreScroll=previous.scroll;emit('navigate',previous.view,previous.query)}else navigate({user:'',page:1,search:'',sort:''},'users')}
 function openColumns(){columnDraft.value=columns.value.map(c=>c.key);columnsOpen.value=true}
-function saveColumns(){selectedColumns.value={...selectedColumns.value,[props.view]:allColumns.value.filter((c,i)=>i===0||columnDraft.value.includes(c.key)).map(c=>c.key)};columnsOpen.value=false;try{localStorage.setItem('analytics.columns.v1',JSON.stringify(selectedColumns.value))}catch{}}
+function saveColumns(){selectedColumns.value={...selectedColumns.value,[props.view]:allColumns.value.filter((c,i)=>i===0||columnDraft.value.includes(c.key)).map(c=>c.key)};columnsOpen.value=false;try{localStorage.setItem('analytics.columns.v2',JSON.stringify(selectedColumns.value))}catch{}}
 function closePageSize(){if(pageSizeMenu.value){pageSizeMenu.value.open=false;pageSizeMenu.value.querySelector('summary')?.focus()}}
 function changePageSize(limit:number){closePageSize();navigate({limit,page:1})}
 async function load(){
@@ -116,7 +118,7 @@ async function load(){
   finally{if(controller===request)busy.value=false}
 }
 watch(()=>[props.view,props.query],()=>{state.value=readAnalyticsState(props.query);filters.value={...state.value};search.value=state.value.search;data.value=undefined;overview.value=undefined;health.value=undefined;profile.value=undefined;columnsOpen.value=false;void load()})
-onMounted(()=>{try{const saved=JSON.parse(localStorage.getItem('analytics.columns.v1')??'{}');for(const entry of analyticsViews){const keys=saved[entry.id];if(Array.isArray(keys))selectedColumns.value[entry.id]=columnsFor(entry.id).filter((c,i)=>i===0||keys.includes(c.key)).map(c=>c.key)}}catch{}void load()})
+onMounted(()=>{try{const current=localStorage.getItem('analytics.columns.v2');const saved=JSON.parse(current??localStorage.getItem('analytics.columns.v1')??'{}');for(const entry of analyticsViews){const keys=restoreColumns(entry.id,saved[entry.id],current===null);if(keys)selectedColumns.value[entry.id]=keys}if(current===null)localStorage.setItem('analytics.columns.v2',JSON.stringify(selectedColumns.value))}catch{}void load()})
 onBeforeUnmount(()=>controller?.abort())
 </script>
 
@@ -131,7 +133,7 @@ onBeforeUnmount(()=>controller?.abort())
       <button class="button primary" :disabled="busy">应用筛选</button>
     </form>
     <p v-if="filtersChanged" class="analytics-pending" role="status">筛选条件已修改，应用后更新数据。</p>
-    <div v-if="state.user" class="analytics-user"><span>当前用户 <strong>{{userName}}</strong><small>沿用当前日期、环境与版本</small></span><button class="button secondary" @click="returnUsers">返回用户列表</button></div>
+    <div v-if="state.user" class="analytics-user"><div class="analytics-user-profile"><span>当前用户 <strong>{{userName}}</strong><span v-if="profile?.account && profile.account!==userName" class="analytics-user-account">{{profile.account}}</span></span><dl><div><dt>部门</dt><dd><DepartmentLabel :name="profile?.deptName" :full-name="profile?.departmentName" /></dd></div><div><dt>一级部门</dt><dd>{{profile?.deptL1Name || '—'}}</dd></div><div class="analytics-full-department"><dt>完整部门</dt><dd>{{profile?.departmentName || '—'}}</dd></div></dl><small>沿用当前日期、环境与版本</small></div><button class="button secondary" @click="returnUsers">返回用户列表</button></div>
     <div v-if="error" class="analytics-error" role="alert">{{error}}<button class="text-button" :disabled="busy" @click="load">重试</button></div>
     <p v-if="busy&&!data" class="analytics-loading" role="status">正在读取统计数据…</p>
     <template v-if="data">
@@ -147,9 +149,11 @@ onBeforeUnmount(()=>controller?.abort())
         <p v-if="state.search&&isUsers" class="analytics-search-note">搜索“{{state.search}}”的结果 <button class="text-button" @click="navigate({search:'',page:1})">清除搜索</button><span> · 上方指标为当前时段的全部用户</span></p>
         <div v-if="rows.length" ref="tableRegion" class="analytics-table" role="region" :aria-label="`${title}表格，可横向滚动查看完整字段`" tabindex="0"><table>
           <thead><tr class="analytics-group-row"><th v-if="view==='rankings'" rowspan="2" scope="col" class="rank-column">排名</th><th v-for="(group,index) in groups" :key="`${group.label}-${index}`" scope="colgroup" :colspan="group.span">{{group.label}}</th><th v-if="isUsers" rowspan="2" scope="col" class="detail-column"><span class="sr-only">查看用户详情</span></th></tr>
-            <tr><th v-for="(column,index) in columns" :key="column.key" scope="col" :aria-sort="ariaSort(column.key)" :class="{numeric:column.numeric,'identity-column':index===0}"><button v-if="view==='users'" class="analytics-sort" :disabled="busy" @click="sortBy(column.key)">{{column.label}}<Icon name="chevron" :size="11" :class="['sort-indicator',state.sort===column.key?state.direction:'inactive']" /></button><template v-else>{{column.label}}</template></th></tr>
+            <tr><th v-for="(column,index) in columns" :key="column.key" scope="col" :aria-sort="ariaSort(column.key)" :class="{numeric:column.numeric,'identity-column':index===0}"><button v-if="sortable(column.key)" class="analytics-sort" :disabled="busy" @click="sortBy(column.key)">{{column.label}}<Icon name="chevron" :size="11" :class="['sort-indicator',state.sort===column.key?state.direction:'inactive']" /></button><template v-else>{{column.label}}</template></th></tr>
           </thead><tbody><tr v-for="(row,index) in rows" :key="String(row.userId??row.eventId??row.skillName??row.feature??row.code??`${row.initiator}:${row.sessionKind}`)"><td v-if="view==='rankings'" class="rank-column">{{offset+index+1}}</td><td v-for="(column,columnIndex) in columns" :key="column.key" :class="{numeric:column.numeric,'identity-column':columnIndex===0}">
               <button v-if="column.key==='displayName'&&isUsers" class="analytics-identity" @click="inspect(row)"><strong>{{row.displayName||row.account||'未提供姓名'}}</strong><small>{{row.displayName===row.account?'姓名未提供':row.account}}</small></button>
+              <span v-else-if="column.key==='displayName'" class="analytics-identity"><strong>{{row.displayName||row.account||'未识别用户'}}</strong><small v-if="row.account && row.account!==row.displayName">{{row.account}}</small></span>
+              <DepartmentLabel v-else-if="column.key==='deptName'" :name="row.deptName" :full-name="row.departmentName" />
               <span v-else-if="column.key==='outcome'" class="analytics-status" :class="String(row.outcome??'unknown')">{{format(column.key,row[column.key])}}</span>
               <span v-else-if="column.key==='code'" class="analytics-health-reason">{{healthReasons[String(row.code)]??'其他采集提示'}}<small>{{row.code}}</small></span>
               <span v-else :title="['lastSeen','occurredAt'].includes(column.key)?fullDate(row[column.key]):undefined">{{format(column.key,row[column.key])}}</span>

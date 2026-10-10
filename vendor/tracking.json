@@ -1,28 +1,19 @@
 {
-  "name": "@dsh-ops/tracking",
+  "name": "@dsh-ops/tracking-contract",
   "version": "0.1.0",
-  "sourceRepository": "dsh_plugins",
-  "sourceCommit": "3e043009ceb0c76f93104e5194878a7e5c8ba585",
+  "sourceRepository": "ops-harness",
+  "sourceCommit": "cff7323e8799c2be1c046449d107a9e25ec5973a",
   "sourceWorkingTree": true,
-  "sourcePath": "packages/shared/logger-tracking",
-  "artifact": "dsh-ops-tracking-0.1.0-09e9c3671ab4.tgz",
-  "sha256": "09e9c3671ab4889df36fa988e20c474d36a79e0c48c6cb725337a712af484ce7",
+  "sourcePath": "packages/shared/tracking-contract",
+  "artifact": "dsh-ops-tracking-contract-0.1.0-f76676da1bb6.tgz",
+  "sha256": "f76676da1bb620782786797f7639131368af538afbed67f9dd568c4aa06ba58a",
   "sourceSha256": {
-    "package.json": "bc6c242618330677ee68648d20e52337798119300e3adc394fa2e1b524ebf0a3",
+    "package.json": "3c480d756d9ae2e5afe8c0af41a4108c6bf27d043412d830232705fb17122ad9",
     "tsconfig.json": "2b6cd99fd1f9d683c4a36925e35d72dbedcc02c38ed934cab40ec1e3c36a401e",
-    "README.md": "1acf35180fbe1acca79ec649534f69f2d1fd455d9ca8dfffc4fc73a1c4b84765",
-    "src/client.js": "dec92ee1c1625e5e6891cc4c2b7c54164134734d3b3002672e5c3dc2ff380656",
-    "src/contracts.ts": "7729dc1a434c3c7d3b62bfd179adb88157bcb31032c88fed2dd146c1394a538b",
-    "src/event-file.ts": "d3b235ac02632b06494af02ca8fc8aeb8770a4cf7927c7bb3df36d0abebed3e5",
-    "src/host.ts": "b6b5c081fba48e386220b74fabff0622306aa8ef5118499dab680405c6fe93c3",
-    "src/identity-provider.ts": "de860e04a54a8893fdfaac4b9ef005cd0dffbaa47ae6d23480202871340c4f8d",
-    "src/index.ts": "b98bde53050eb5e75c2c4bd5b6d1c071bfc8e4bdcdeb439fead15f409dac87c6",
-    "src/service.ts": "77d762b40582ec2c43e1fa66c0ed00128a27b4ae08a21a7879315db3f82cb6c3",
-    "src/session-observer.ts": "a9db1a7e007ef048cc8b7ad425c97f220e112bf877e459cfdd0cc63fc2353ad9",
-    "src/uploader.ts": "d71aa2bf5b8045142c96edcbad13f142cf79c8d7fd5f4964bbad1ce5a7695585",
-    "src/writer-lock.ts": "df834aff62151491123868b59f33436a7901bf262234d768b2e6e7d78aa4fff8"
+    "README.md": "b119b90a8c56555d8472271ba7b573954b7bc96c42e965281dbbb9a7c66c0eb7",
+    "src/index.ts": "31b90162642d71303ecfd7ea685f6bf72583cd80e4ce719878ded5afc3e20305"
   },
   "packageManager": "pnpm@11.19.0",
   "protocolSchemaVersion": 1,
-  "protocolCatalogVersion": 3
+  "protocolCatalogVersion": 4
 }

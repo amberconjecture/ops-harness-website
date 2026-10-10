@@ -4,11 +4,20 @@
 
 官网新增机器采集 API `/api/tracking/v1/events:batch` 和管理员 `/api/admin/analytics/*`。普通 logger 保持原实现，官网不访问终端 DSH_HOME。
 
+## 2026-10-10：WeLink 姓名与部门资料
+
+- 工号仍按 `tenant + source + employeeId` 唯一归属。工作助手在读取 WeLink 登录状态后查询个人资料，事件的 `employee` 可选携带 `chineseName`、`departmentName`、`deptL1Name`、`deptName` 与成功查询时间 `profileUpdatedAt`；不接收完整通讯录响应，不将姓名或部门解释为权限。既有工号事件和匿名事件继续兼容。
+- 产品契约独立为只依赖 zod 的 `@dsh-ops/tracking-contract`；官网仅安装该纯包的精确 vendor 制品。按产品 DSH 升级计划 K16，不再从含 Host 私有 workspace 依赖的 tracking 插件打包官网依赖。目录版本 4，事件和批次 schemaVersion 仍为 1。
+- SQLite v3 在事务中为用户添加四项资料及查询时间，保留既有身份和事实。只在通过事件及操作上下文检查后接受较新的资料时间；缺失字段、旧客户端、较旧缓存和离线补传均不清空已知资料。时间规范化为 UTC；没有资料时间的字段仅留在原始事件，不替换当前用户资料。历史记录继续按原工号归属，管理台展示该工号最新收到的有效资料，不回填历史匿名事件。
+- 操作开始时冻结完整 employee 快照，完成时沿用；官网保持现有上下文匹配与幂等摘要。资料更新不会改变进行中操作的身份。拒收的上下文冲突不能改写当前资料。
+- 用户明细、排名、操作明细默认显示姓名、工号与最小部门；部门悬浮或键盘聚焦显示完整部门，Escape 关闭。个人详情同时显示一级部门和完整部门。部门不加入排序或筛选协议。列偏好从 v1 到 v2 只迁移一次，保留原选择并补入默认部门列，此后允许隐藏。
+- 部署先更新并重启官网，再发布/重启工作助手。旧官网严格契约会永久拒收新增资料字段，因此不能先更新终端，也不能靠清空队列重试。
+
 2026-09-21 配置收敛：移除 trackingDevelopment 及仅本机开发兼容分支，采集仅由 trackingEnabled 控制（缺省 false，仓库示例 true），与启动方式/批次环境无关。统计查询默认环境由既有 --dev 启动参数决定（development/production），不增加配置项；显式环境筛选与浏览器偏好保持有效。外部部署配置须删除旧 trackingDevelopment 字段，配置继续严格校验未知键，不做静默忽略或隐式开启。
 
 2026-09-21 部署修正（替代下述仅本机开发限制）：新增 trackingEnabled，显式 true 时正常 pnpm start 即可接收远程 Host 的 production/development/test 批次，无须 Token，生产采集认证按用户要求后续实现；显式 false 关闭采集。字段缺省时关闭采集，不再保留本机开发特例。配置示例显式 true，服务启动打印采集开关。environment 只用于统计分类，不再决定上传资格。继续拒绝浏览器来源，保留管理员鉴权、逐条校验、限流、大小/并发边界和去重。既有 tenant=development 是历史单租户命名空间，继续复用以保持工号、幂等记录的连续性，与事件 environment 无关。未改协议/数据库 schema，不需要同步新的 vendor 制品。受控部署的采集尚无身份认证，不将员工自报字段解释为管理权限。
 
-- 事件协议源码在产品仓库 `packages/shared/logger-tracking`，通过 `@dsh-ops/tracking/contracts` 的精确 vendor tarball 分发。纯契约不导入 DSH 或 Cordis；这些 Host peer 为 optional，官网不安装或运行插件。
+- 事件协议源码在产品仓库 `packages/shared/tracking-contract`，通过 `@dsh-ops/tracking-contract` 的精确 vendor tarball 分发。纯契约只依赖 zod，不导入 DSH 或 Cordis；官网不安装或运行终端插件。
 - 历史实现（2026-09-21 已修正）：2026-09-20 用户调整范围：开发调试免认证，生产验证暂不实现。仅 `--dev` 且 `trackingDevelopment: true` 开放本机 Host POST；不配置 Token 或凭据环境变量。批次自报 installationId/environment，服务端固定开发 tenant，拒绝 production、浏览器 Origin/Fetch-Metadata 与非 loopback 连接，仍限制大小、频率和并发。正常生产启动关闭采集入口。
 - 按用户最新决定，直接采用工作助手左下角登录工号的同源 Host 字段（WeLink auth.accountLabel）；无需额外 SSO。事件可选携带 employee.source=welink 与规范化 employeeId，官网按 tenant + source + 工号跨安装去重。只用于统计归属，不用于管理员或生产上传鉴权。旧 identityRef 保留兼容，二者互斥；历史匿名记录不追归当前工号。identity-sessions 仍不开放。
 - SQLite 单机本地盘，独立 analyticsDirectory，由有界 Worker 串行处理；WAL、FULL 同步、参数化查询与版本表。事件、去重、受影响日期汇总同一事务提交后确认。唯一 eventId 防重传，operationId 防重复终态。

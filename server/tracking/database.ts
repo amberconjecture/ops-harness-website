@@ -3,7 +3,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { mkdirSync, lstatSync, existsSync } from 'node:fs'
 import path from 'node:path'
 import { userSortKeys, type UserSortKey } from '../../shared/analytics.js'
-import { EventSchema, Id, isActive, isSuccess, type BatchResponse, type TrackingEvent } from '@dsh-ops/tracking/contracts'
+import { EventSchema, Id, isActive, isSuccess, type BatchResponse, type TrackingEvent } from '@dsh-ops/tracking-contract'
 export type Installation = { tenantId: string; installationId: string; environment: 'production' | 'development' | 'test' }
 export type Principal = { issuer: string; subject: string; displayName: string; expiresAt: number }
 export type AnalyticsQuery = { from: string; to: string; environment: string; platform?: string | undefined; appVersion?: string | undefined; userId?: string | undefined; offset: number; limit: number; search?: string | undefined; sort?: UserSortKey | undefined; direction?: 'asc' | 'desc' | undefined }
@@ -38,7 +38,7 @@ export class TrackingDatabase {
       CREATE TABLE IF NOT EXISTS ingestion_health(code TEXT PRIMARY KEY,count INTEGER);
     `)
     const version = Number(this.db.prepare('SELECT MAX(version) AS version FROM schema_version').get()?.version)
-    if (version !== 1 && version !== 2) throw new Error('UNSUPPORTED_ANALYTICS_SCHEMA')
+    if (![1, 2, 3].includes(version)) throw new Error('UNSUPPORTED_ANALYTICS_SCHEMA')
     if (version === 1) {
       this.db.exec('BEGIN IMMEDIATE')
       try {
@@ -49,6 +49,17 @@ export class TrackingDatabase {
           CREATE INDEX runtime_skill ON runtime_facts(skill_name);
           INSERT INTO runtime_facts SELECT tenant,id,'',0,0,'root','','',0,0,0,0,0,0,'','','' FROM activity_facts WHERE event_name='conversation.message.accepted';
           INSERT INTO schema_version VALUES(2); COMMIT;`)
+      } catch (error) { this.db.exec('ROLLBACK'); throw error }
+    }
+    if (version < 3) {
+      this.db.exec('BEGIN IMMEDIATE')
+      try {
+        this.db.exec(`ALTER TABLE users ADD COLUMN chinese_name TEXT;
+          ALTER TABLE users ADD COLUMN department_name TEXT;
+          ALTER TABLE users ADD COLUMN dept_l1_name TEXT;
+          ALTER TABLE users ADD COLUMN dept_name TEXT;
+          ALTER TABLE users ADD COLUMN profile_updated_at TEXT;
+          INSERT INTO schema_version VALUES(3); COMMIT;`)
       } catch (error) { this.db.exec('ROLLBACK'); throw error }
     }
   }
@@ -62,7 +73,7 @@ export class TrackingDatabase {
       let user = this.db.prepare('SELECT id FROM users WHERE tenant=? AND issuer=? AND subject=?').get(tenantId, principal.issuer, principal.subject)
       if (!user) {
         const id = randomUUID()
-        this.db.prepare('INSERT INTO users VALUES(?,?,?,?,?)').run(id, tenantId, principal.issuer, principal.subject, principal.displayName)
+        this.db.prepare('INSERT INTO users(id,tenant,issuer,subject,display_name) VALUES(?,?,?,?,?)').run(id, tenantId, principal.issuer, principal.subject, principal.displayName)
         user = { id }
       } else this.db.prepare('UPDATE users SET display_name=? WHERE id=?').run(principal.displayName, user.id!)
       this.db.prepare('INSERT OR IGNORE INTO user_identities VALUES(?,?,?,?)').run(tenantId, principal.issuer, principal.subject, user.id!)
@@ -105,7 +116,7 @@ export class TrackingDatabase {
           const { source, employeeId } = event.employee
           const user = this.db.prepare('SELECT id FROM users WHERE tenant=? AND issuer=? AND subject=?').get(tenant, source, employeeId)
           userId = user ? String(user.id) : randomUUID()
-          if (!user) this.db.prepare('INSERT INTO users VALUES(?,?,?,?,?)').run(userId, tenant, source, employeeId, employeeId)
+          if (!user) this.db.prepare('INSERT INTO users(id,tenant,issuer,subject,display_name) VALUES(?,?,?,?,?)').run(userId, tenant, source, employeeId, employeeId)
           this.db.prepare('INSERT OR IGNORE INTO user_identities VALUES(?,?,?,?)').run(tenant, source, employeeId, userId)
         }
         let accepted: TrackingEvent | undefined
@@ -131,6 +142,16 @@ export class TrackingDatabase {
             } else { pending = 1; userId = null }
             this.db.prepare('INSERT INTO operations(tenant,installation,operation,terminal,terminal_digest) VALUES(?,?,?,?,?) ON CONFLICT(tenant,installation,operation) DO UPDATE SET terminal=excluded.terminal,terminal_digest=excluded.terminal_digest').run(tenant, installation.installationId, event.operationId, JSON.stringify(event), terminalDigest)
           }
+        }
+        // Update only after operation validation; rejected or older offline events
+        // must not change the user's current profile. Missing values retain known data.
+        if (userId && event.employee?.profileUpdatedAt && [event.employee.chineseName, event.employee.departmentName, event.employee.deptL1Name, event.employee.deptName].some(Boolean)) {
+          const profile = event.employee
+          const updatedAt = new Date(profile.profileUpdatedAt!).toISOString()
+          this.db.prepare(`UPDATE users SET display_name=COALESCE(?,display_name),chinese_name=COALESCE(?,chinese_name),
+            department_name=COALESCE(?,department_name),dept_l1_name=COALESCE(?,dept_l1_name),dept_name=COALESCE(?,dept_name),profile_updated_at=?
+            WHERE id=? AND (profile_updated_at IS NULL OR profile_updated_at<?)`)
+            .run(profile.chineseName ?? null, profile.chineseName ?? null, profile.departmentName ?? null, profile.deptL1Name ?? null, profile.deptName ?? null, updatedAt, userId, updatedAt)
         }
         this.db.prepare('INSERT INTO event_dedup VALUES(?,?,?,?)').run(tenant, id, hash, receivedAt)
         this.db.prepare('INSERT INTO tracking_events VALUES(?,?,?,?)').run(tenant, id, JSON.stringify(event), receivedAt)
@@ -214,13 +235,13 @@ export class TrackingDatabase {
       const order = kind === 'users' && q.sort && userSortKeys.includes(q.sort)
         ? `${q.sort} ${q.direction === 'asc' ? 'ASC' : 'DESC'},f.user_id`
         : 'activeDays DESC,successes DESC,features DESC,f.user_id'
-      const rows = run(`SELECT f.user_id AS userId,u.display_name AS displayName,u.subject AS account,MIN(occurred_at) AS firstSeen,MAX(occurred_at) AS lastSeen,COUNT(DISTINCT CASE WHEN active=1 THEN day END) AS activeDays,COUNT(DISTINCT CASE WHEN active=1 THEN f.tenant||':'||installation||':'||interaction END) AS interactions,COUNT(DISTINCT CASE WHEN success=1 THEN f.tenant||':'||installation||':'||operation END) AS successes,COUNT(DISTINCT CASE WHEN active=1 THEN feature END) AS features,
+      const rows = run(`SELECT f.user_id AS userId,u.display_name AS displayName,u.subject AS account,u.chinese_name AS chineseName,u.department_name AS departmentName,u.dept_l1_name AS deptL1Name,u.dept_name AS deptName,u.profile_updated_at AS profileUpdatedAt,MIN(occurred_at) AS firstSeen,MAX(occurred_at) AS lastSeen,COUNT(DISTINCT CASE WHEN active=1 THEN day END) AS activeDays,COUNT(DISTINCT CASE WHEN active=1 THEN f.tenant||':'||installation||':'||interaction END) AS interactions,COUNT(DISTINCT CASE WHEN success=1 THEN f.tenant||':'||installation||':'||operation END) AS successes,COUNT(DISTINCT CASE WHEN active=1 THEN feature END) AS features,
         SUM(${message}) AS messages,COUNT(DISTINCT CASE WHEN ${message} AND r.conversation<>'' THEN f.tenant||':'||r.conversation END) AS conversations,COALESCE(SUM(${tokens}),0) AS totalTokens,COALESCE(SUM(r.result='succeeded'),0) AS skillLoads
         FROM activity_facts f JOIN users u ON u.id=f.user_id LEFT JOIN runtime_facts r ON r.tenant=f.tenant AND r.id=f.id WHERE ${where} GROUP BY f.user_id ORDER BY ${order} LIMIT ? OFFSET ?`, [q.limit, q.offset])
       const total = run(`SELECT COUNT(DISTINCT ${userKey}) AS value FROM activity_facts f JOIN users u ON u.id=f.user_id WHERE ${where}`)[0]?.value ?? 0
       return { ...meta, rows, total, offset: q.offset, limit: q.limit }
     }
-    if (kind === 'operations') return { ...meta, rows: run(`SELECT f.id AS eventId,f.occurred_at AS occurredAt,f.user_id AS userId,u.display_name AS displayName,f.feature,f.action,f.event_name AS eventName,f.initiator,f.outcome, e.body FROM activity_facts f JOIN tracking_events e ON e.tenant=f.tenant AND e.id=f.id LEFT JOIN users u ON u.id=f.user_id WHERE ${where} ORDER BY occurred_at DESC,f.id LIMIT ? OFFSET ?`, [q.limit, q.offset]).map(({ body, ...row }) => ({ ...row, durationMs: (JSON.parse(String(body)) as TrackingEvent).durationMs ?? null })), limit: q.limit, offset: q.offset, retentionDays: 90 }
+    if (kind === 'operations') return { ...meta, rows: run(`SELECT f.id AS eventId,f.occurred_at AS occurredAt,f.user_id AS userId,u.display_name AS displayName,u.subject AS account,u.chinese_name AS chineseName,u.department_name AS departmentName,u.dept_l1_name AS deptL1Name,u.dept_name AS deptName,u.profile_updated_at AS profileUpdatedAt,f.feature,f.action,f.event_name AS eventName,f.initiator,f.outcome, e.body FROM activity_facts f JOIN tracking_events e ON e.tenant=f.tenant AND e.id=f.id LEFT JOIN users u ON u.id=f.user_id WHERE ${where} ORDER BY occurred_at DESC,f.id LIMIT ? OFFSET ?`, [q.limit, q.offset]).map(({ body, ...row }) => ({ ...row, durationMs: (JSON.parse(String(body)) as TrackingEvent).durationMs ?? null })), limit: q.limit, offset: q.offset, retentionDays: 90 }
     throw new Error('UNKNOWN_ANALYTICS_QUERY')
   }
   maintain() {

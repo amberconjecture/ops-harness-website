@@ -20,8 +20,8 @@
     "vue": "3.5.42",
     "yaml": "2.9.0",
     "zod": "4.4.3",
-    "@dsh-ops/tracking": "file:vendor/dsh-ops-tracking-0.1.0-09e9c3671ab4.tgz",
-    "@dsh-ops/expert-distribution-contract": "file:vendor/dsh-ops-expert-distribution-contract-0.2.2-eb571c3166d5.tgz"
+    "@dsh-ops/expert-distribution-contract": "file:vendor/dsh-ops-expert-distribution-contract-0.2.2-eb571c3166d5.tgz",
+    "@dsh-ops/tracking-contract": "file:vendor/dsh-ops-tracking-contract-0.1.0-f76676da1bb6.tgz"
   },
   "devDependencies": {
     "@types/markdown-it": "14.2.0",

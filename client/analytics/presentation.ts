@@ -20,14 +20,18 @@ export type Column = { key: string; label: string; group: string; numeric: boole
 const col = (key: string, label: string, group: string, numeric = true): Column => ({ key, label, group, numeric })
 export function columnsFor(view: AnalyticsView): Column[] {
   if (view === 'users' || view === 'rankings') return [
-    col('displayName','姓名 / 工号','用户',false), col('activeDays','活跃天数','活跃情况'), col('interactions','主动操作','活跃情况'), col('successes','成功操作','活跃情况'), col('features','使用功能数','活跃情况'),
+    col('displayName','姓名 / 工号','用户',false), col('deptName','部门','用户',false), col('activeDays','活跃天数','活跃情况'), col('interactions','主动操作','活跃情况'), col('successes','成功操作','活跃情况'), col('features','使用功能数','活跃情况'),
     col('messages','对话次数','对话与用量'), col('conversations','会话数','对话与用量'), col('totalTokens','Token','对话与用量'), col('skillLoads','Skill 加载','对话与用量'), col('lastSeen','最近活动时间','最近活动',false),
   ]
   if (view === 'features') return [col('feature','功能','功能',false),col('users','使用人数','用户覆盖'),col('visitors','访问人数','用户覆盖'),col('uses','使用次数','使用情况'),col('successes','成功操作','操作结果'),col('failures','失败操作','操作结果')]
   if (view === 'conversations') return [col('initiator','来源','会话来源',false),col('sessionKind','会话类型','会话来源',false),col('messages','人工消息','对话与步骤'),col('conversations','人工会话','对话与步骤'),col('modelSteps','模型步骤','对话与步骤'),col('missingUsage','用量缺失','对话与步骤'),col('inputTokens','普通输入','输入 Token'),col('cacheReadTokens','缓存读取','输入 Token'),col('cacheWriteTokens','缓存写入','输入 Token'),col('outputTokens','输出','输出 Token'),col('reasoningTokens','其中推理','输出 Token'),col('totalTokens','Token 总量','汇总')]
   if (view === 'skills') return [col('skillName','Skill 名称','技能',false),col('loads','成功加载','加载结果'),col('failures','加载失败','加载结果'),col('users','已识别人数','使用覆盖'),col('installations','安装实例','使用覆盖'),col('conversations','会话数','使用覆盖'),col('explicitLoads','显式加载','加载方式'),col('modelLoads','模型加载','加载方式'),col('userLoads','人工回合加载','来源')]
   if (view === 'health') return [col('code','采集提示','拒收原因',false),col('count','记录数','历史累计')]
-  return [col('occurredAt','时间','操作',false),col('displayName','用户','操作',false),col('feature','功能','操作',false),col('action','动作','操作',false),col('eventName','阶段','执行情况',false),col('initiator','来源','执行情况',false),col('outcome','结果','执行情况',false),col('durationMs','耗时','执行情况')]
+  return [col('occurredAt','时间','操作',false),col('displayName','姓名 / 工号','操作',false),col('deptName','部门','操作',false),col('feature','功能','操作',false),col('action','动作','操作',false),col('eventName','阶段','执行情况',false),col('initiator','来源','执行情况',false),col('outcome','结果','执行情况',false),col('durationMs','耗时','执行情况')]
+}
+export function restoreColumns(view: AnalyticsView, saved: unknown, addDepartment = false): string[] | undefined {
+  if (!Array.isArray(saved)) return undefined
+  return columnsFor(view).filter((column, index) => index === 0 || saved.includes(column.key) || (addDepartment && column.key === 'deptName')).map(column => column.key)
 }
 export function defaultColumns(view: AnalyticsView) {
   return columnsFor(view).filter(c => !['users','rankings'].includes(view) || !['features','messages','conversations'].includes(c.key)).map(c => c.key)

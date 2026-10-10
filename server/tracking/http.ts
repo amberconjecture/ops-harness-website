@@ -1,7 +1,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { z } from 'zod'
 import { userSortKeys } from '../../shared/analytics.js'
-import { BatchSchema, MAX_BATCH_BYTES } from '@dsh-ops/tracking/contracts'
+import { BatchSchema, MAX_BATCH_BYTES } from '@dsh-ops/tracking-contract'
 import { GuideError } from '../guide-store.js'
 import type { AdminHandler } from '../admin-files.js'
 import { dayAt, type Installation } from './database.js'

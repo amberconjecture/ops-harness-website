@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { TrackingDatabase, type AnalyticsQuery } from '../server/tracking/database.js'
-import type { TrackingEvent } from '@dsh-ops/tracking/contracts'
+import type { TrackingEvent } from '@dsh-ops/tracking-contract'
 const now = Date.parse('2026-09-20T06:00:00Z')
 const q: AnalyticsQuery = { from: '2026-09-01', to: '2026-09-20', environment: 'test', offset: 0, limit: 50 }
 const installation = { tenantId: 'test', installationId: randomUUID(), environment: 'test' as const }
@@ -59,7 +59,7 @@ test('v1 migration retains old facts, backfills legacy messages and is safe to r
   try {
     db.ingest(installation, [event('conversation.message.accepted', {}, { properties: {} })]); db.close()
     const legacy = new DatabaseSync(path.join(root, 'analytics.sqlite'))
-    legacy.exec('DROP TABLE runtime_facts; DELETE FROM schema_version WHERE version=2'); legacy.close()
+    legacy.exec('DROP TABLE runtime_facts; ALTER TABLE users DROP COLUMN chinese_name; ALTER TABLE users DROP COLUMN department_name; ALTER TABLE users DROP COLUMN dept_l1_name; ALTER TABLE users DROP COLUMN dept_name; ALTER TABLE users DROP COLUMN profile_updated_at; DELETE FROM schema_version WHERE version>1'); legacy.close()
     db = new TrackingDatabase(root, () => now)
     assert.equal((db.query('conversations', q) as any).messages, 1)
     assert.equal((db.query('conversations', q) as any).conversations, 0)

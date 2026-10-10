@@ -6,7 +6,7 @@ import path from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { TrackingDatabase, dayAt, type Installation, type AnalyticsQuery } from '../server/tracking/database.js'
 import { TrackingStore } from '../server/tracking/store.js'
-import type { TrackingEvent } from '@dsh-ops/tracking/contracts'
+import type { TrackingEvent } from '@dsh-ops/tracking-contract'
 const now = Date.parse('2026-09-20T06:00:00.000Z')
 const installation = (): Installation => ({ tenantId: 'company', installationId: randomUUID(), environment: 'test' })
 function event(i: Installation, extra: Partial<TrackingEvent> = {}): TrackingEvent {

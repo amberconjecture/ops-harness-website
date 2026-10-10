@@ -139,6 +139,28 @@ test('collection validates installation/environment and rejects browser requests
   assert.equal(identity.status, 503); assert.deepEqual(await identity.json(), { error: 'IDENTITY_NOT_CONFIGURED' })
 })
 
+test('employee details travel through collection to authenticated personal views, with bounded fields', async t => {
+  const { origin, post, batch, event } = await fixture(t, true)
+  const employee = { source: 'welink', employeeId: 'qa-profile', chineseName: '官网验收同事', departmentName: '示例集团 / 数字业务部 / 体验组', deptL1Name: '数字业务部', deptName: '体验组', profileUpdatedAt: new Date().toISOString() }
+  const endpoint = '/api/tracking/v1/events:batch'
+  assert.deepEqual((await (await post(endpoint, { ...batch, events: [{ ...event, employee }] })).json() as any).acceptedIds, [event.eventId])
+  const invalid = { ...event, eventId: randomUUID(), operationId: randomUUID(), employee: { ...employee, departmentName: 'x'.repeat(1025) } }
+  assert.deepEqual((await (await post(endpoint, { ...batch, events: [invalid] })).json() as any).rejected, [{ id: invalid.eventId, code: 'INVALID_EVENT', retryable: false }])
+  const login = await post('/api/admin/login', { password: 'test-admin-password-only' }, { Origin: origin })
+  const headers = { Cookie: login.headers.get('set-cookie')!.split(';')[0]! }
+  let userId = ''
+  for (const kind of ['users', 'rankings', 'operations']) {
+    const result = await (await fetch(`${origin}/api/admin/analytics/${kind}`, { headers })).json() as any
+    const row = result.rows[0]
+    userId = row.userId
+    assert.equal(row.displayName, employee.chineseName); assert.equal(row.account, employee.employeeId)
+    for (const key of ['chineseName', 'departmentName', 'deptL1Name', 'deptName', 'profileUpdatedAt'] as const) assert.equal(row[key], employee[key])
+  }
+  const detail = await (await fetch(`${origin}/api/admin/analytics/users/${userId}`, { headers })).json() as any
+  assert.equal(detail.rows[0].deptL1Name, employee.deptL1Name)
+  assert.equal((await fetch(`${origin}/api/admin/analytics/users?sort=deptName`, { headers })).status, 400)
+})
+
 test('disabled collection still allows authenticated analytics queries with their configured default', async t => {
   const { origin, post, batch } = await fixture(t, false, 'production')
   const response = await post('/api/tracking/v1/events:batch', batch)
