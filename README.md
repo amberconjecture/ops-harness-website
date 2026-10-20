@@ -320,6 +320,8 @@ GitHub 的 `Website checks` workflow 自动执行冻结安装、类型检查、�
 
 `pnpm tracking` 默认设置 16 GiB Node 老生代堆上限；离线初始化/补数的 ClickHouse 单次请求与查询默认 5 分钟，可用 `--timeout-ms 300000` 显式指定，整次补数不设总时限。启动日志输出实际堆上限和超时预算。该设置不修改官网进程的内存和超时配置。
 
+首轮全量超过旧源 TTL 宽限期后仍可用原命令、原目标库和原 analyticsDirectory 续跑，只输出一次保留期提示，不清库或重置断点。旧源已被 TTL 删除的记录可能缺失，无法据此承诺历史快照完整；增量日志连续性和最终 5 分钟切换检查继续生效。
+
 
 管理员 `/admin` 新增“运营统计”，支持登录人数、DAU/近30天MAU、用户明细与排名、功能使用和操作明细。独立 ClickHouse 运营存储与采集 API 不改变普通 logger。本地 `pnpm dev` 开放免认证采集，产品开发 overlay 默认上传至 `http://127.0.0.1:4173`，无需 Token 环境变量。未取得 WeLink 工号时保持匿名。部署时显式配置 `trackingEnabled: true`，正常 `pnpm start` 即可接收远程 Host 的 production/development/test 批次；采集认证后续实现，管理员登录保持原规则。详见 [运营统计部署](docs/runbooks/operational-tracking.md) 和 [ADR 0019](docs/adr/0019-operational-tracking.md)。
 

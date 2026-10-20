@@ -21,8 +21,9 @@ async function main() {
       'upgrade keeps the old ClickHouse writer online. Use a new target database and analyticsDirectory; keep the target service stopped while copying.',
       'Repeat upgrade for incremental catch-up. --finalize arms cutover only when lag is at most five minutes. Start the new instance, check GET /api/tracking/ready, and switch/drain old traffic before cutoverDeadline.',
       'Startup/readiness does not activate the target. The first business write rechecks the deadline and permanently prevents further imports from the old database.',
+      'A baseline can resume beyond the old TTL grace using its existing target and checkpoint. A retention warning does not stop copying; source rows already removed by TTL may be missing.',
       '--since is required, timezone-qualified and inclusive. Related identities/context are included; user_day is not imported; undated health counters are skipped in SQLite time-window backfill.',
-      'pnpm tracking starts Node with a 16384 MiB old-space limit. --timeout-ms sets each ClickHouse request/read budget (1000-300000 ms, default 300000). A baseline must finish within the old TTL grace; incremental logs must still be retained.',
+      'pnpm tracking starts Node with a 16384 MiB old-space limit. --timeout-ms sets each ClickHouse request/read budget (1000-300000 ms, default 300000). Incremental logs must still be retained; journal gaps and the five-minute cutover limit remain enforced.',
       'init, maintain and SQLite backfill require the target website writer to be stopped. The SQLite source is opened read-only.',
     ].join('\n')); return
   }

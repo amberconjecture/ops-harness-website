@@ -96,12 +96,19 @@ export async function upgradeClickHouse(directory: string, config: AnalyticsConf
     checkpoint.phase = 'copying'; atomicJson(file, checkpoint)
     await target.open(true)
     const round = checkpoint.round
+    let retentionWarningReported = false
     const ensureSource = async () => {
       if (hashCanonical(await lineage()) !== hashCanonical(origin)) throw new Error('ANALYTICS_UPGRADE_SOURCE_CHANGED')
       const now = await serverTime(source), elapsed = Date.parse(now) - Date.parse(round.through.observedAt)
       if (elapsed < 0) throw new Error('ANALYTICS_UPGRADE_INVALID_TIME')
-      // Active baseline rows can disappear only after the legacy TTL grace has elapsed.
-      if (round.mode === 'baseline' && elapsed >= (origin.graceSeconds - 1) * 1000) throw new Error('ANALYTICS_UPGRADE_BASELINE_EXPIRED_USE_NEW_TARGET')
+      // Keep the saved snapshot and cursor even after its retention guarantee expires.
+      if (!retentionWarningReported && round.mode === 'baseline' && elapsed >= (origin.graceSeconds - 1) * 1000) {
+        retentionWarningReported = true
+        options.progress?.({
+          mode: round.mode, warning: 'ANALYTICS_UPGRADE_BASELINE_RETENTION_ELAPSED',
+          observedAt: round.through.observedAt, elapsedMs: elapsed, graceSeconds: origin.graceSeconds,
+        })
+      }
       return now
     }
     const convert = (table: TableName, key: string, payload: string, deleted: number, hash: string, tables = round.tables): Change => {

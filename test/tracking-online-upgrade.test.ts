@@ -232,18 +232,45 @@ test('corrupt source commit fails closed without importing it or arming the targ
   assert.equal((await f.rows('ingestion_health'))[0]!.count, '1')
 })
 
-test('baseline older than source TTL grace refuses to resume a potentially incomplete snapshot', async t => {
+test('expired baseline resumes its saved target and cursor without changing the watermark or cutover deadline', async t => {
   const f = await fixture(t)
-  await f.publish(1, [make('ingestion_health', { code: 'TEST', count: 1 })])
-  const query = ClickHouseHttpClient.prototype.query
-  t.mock.method(ClickHouseHttpClient.prototype, 'query', async function (this: ClickHouseHttpClient, ...args: Parameters<typeof query>) {
-    const rows = await query.apply(this, args)
-    return this.database === f.sourceDatabase && args[0].includes('max(seq) AS seq,now64')
-      ? rows.map(row => ({ ...row, observedAt: new Date(Date.now() - 86400000).toISOString() })) : rows
+  await f.publish(1, ['A', 'B', 'C'].map(code => make('ingestion_health', { code, count: 1 })))
+  await assert.rejects(f.sync({ batchSize: 1, progress: row => {
+    if ((row as { table?: string }).table === 'ingestion_health') throw new Error('SIMULATED_BASELINE_INTERRUPTION')
+  } }), /SIMULATED_BASELINE_INTERRUPTION/)
+  const saved = readUpgradeCheckpoint(f.checkpointFile)
+  assert.equal(saved.round?.cursor, rowKey('ingestion_health', { code: 'A' }))
+  assert.equal((await f.rows('ingestion_health')).length, 1)
+  // Model an old format=2 checkpoint whose original baseline is now outside the TTL grace.
+  saved.round!.through.observedAt = new Date(Date.now() - 86400000).toISOString()
+  atomicJson(f.checkpointFile, saved)
+  await f.publish(2, [make('ingestion_health', { code: 'A', count: 9 })])
+
+  const insert = ClickHouseHttpClient.prototype.insert, inserted: unknown[] = []
+  t.mock.method(ClickHouseHttpClient.prototype, 'insert', async function (this: ClickHouseHttpClient, ...args: Parameters<typeof insert>) {
+    if (this.database === f.target.database && args[0] === 'ingestion_health') inserted.push(...args[1].map(row => row.code))
+    return insert.apply(this, args)
   })
-  await assert.rejects(f.sync(), /BASELINE_EXPIRED_USE_NEW_TARGET/)
-  assert.equal((await f.rows('ingestion_health')).length, 0)
+  const progress: Record<string, unknown>[] = []
+  const resumed = await f.sync({ batchSize: 1, progress: row => progress.push(row as Record<string, unknown>) })
+  assert.equal(resumed.mode, 'baseline'); assert.equal(resumed.phase, 'ready'); assert.equal(resumed.throughSeq, 1)
+  assert.equal(resumed.observedAt, saved.round!.through.observedAt)
+  assert.equal(Date.parse(resumed.cutoverDeadline), Date.parse(resumed.observedAt) + MAX_CUTOVER_LAG_MS)
+  assert.deepEqual(inserted, ['B', 'C'])
+  assert.deepEqual((await f.rows('ingestion_health')).map(row => [row.code, row.count]), [['A', '1'], ['B', '1'], ['C', '1']])
+  const completed = readUpgradeCheckpoint(f.checkpointFile)
+  assert.equal(completed.format, 2); assert.equal(completed.target, saved.target); assert.equal(completed.binding, saved.binding)
+  assert.deepEqual(completed.applied, saved.round!.through)
+  const warnings = progress.filter(row => row.warning)
+  assert.equal(warnings.length, 1)
+  assert.equal(warnings[0]!.warning, 'ANALYTICS_UPGRADE_BASELINE_RETENTION_ELAPSED')
+  assert.equal(warnings[0]!.observedAt, resumed.observedAt)
+  assert.equal(warnings[0]!.graceSeconds, 86400)
   const blocked = f.start(); await assert.rejects(blocked.ready, /UPGRADE_INCOMPLETE/)
+  const fresh = await f.sync({ finalize: true })
+  assert.equal(fresh.mode, 'incremental'); assert.equal(fresh.fromSeq, 1); assert.equal(fresh.throughSeq, 2); assert.equal(fresh.phase, 'armed')
+  assert.equal((await f.rows('ingestion_health'))[0]!.count, '9')
+  assert.equal((await f.source.query(`SELECT max(seq) AS seq FROM ${qualified(f.sourceDatabase, 'published_watermarks')}`))[0]!.seq, '2')
 })
 
 test('bounded source pages finish before target writes can exhaust their HTTP deadline', async t => {
