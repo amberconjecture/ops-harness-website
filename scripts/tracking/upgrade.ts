@@ -156,29 +156,38 @@ export async function upgradeClickHouse(directory: string, config: AnalyticsConf
       for (; round.tableIndex < TABLES.length;) {
         const table = TABLES[round.tableIndex]!
         countsFor(round.tables, table)
+        const from = `FROM ${qualified(sourceDatabase, ENTITY_TABLES[table])}
+          WHERE source_epoch={epoch:UUID} AND commit_seq<={watermark:UInt64}${tail} AND key>{cursor:String}`
+        // Find the next key boundary using the sorting index before reading wide JSON payloads.
+        const keyPage = `SELECT key ${from} ORDER BY key LIMIT {limit:UInt64}`
         const sql = `SELECT key,argMax(tuple(payload,deleted,payload_hash),commit_seq) AS latest
-          FROM ${qualified(sourceDatabase, ENTITY_TABLES[table])}
-          WHERE source_epoch={epoch:UUID} AND commit_seq<={watermark:UInt64}${tail} AND key>{cursor:String}
-          GROUP BY key ORDER BY key`
-        let batch: Change[] = [], cursor = round.cursor
-        const flush = async () => {
-          await apply(batch); round.cursor = cursor; atomicJson(file, checkpoint)
-          options.progress?.({ mode: round.mode, table, ...round.tables[table] }); batch = []
+          ${from} AND key<={throughKey:String} GROUP BY key ORDER BY key`
+        while (true) {
+          // Drain a bounded response before writing: target work must not consume the source HTTP deadline.
+          const params = { epoch, watermark: round.through.seq, cursor: round.cursor }
+          const keys = await source.query(keyPage, { ...params, limit: batchSize }, { operation: 'table_export' })
+          if (!keys.length) break
+          const throughKey = String(keys.at(-1)!.key)
+          const records = await source.query(sql, { ...params, throughKey }, { operation: 'table_export' })
+          const batch = records.map(record => {
+            const [payload, deleted, hash] = record.latest as [string, number, string]
+            return convert(table, String(record.key), payload, deleted, hash)
+          })
+          await apply(batch)
+          round.cursor = throughKey; atomicJson(file, checkpoint)
+          options.progress?.({ mode: round.mode, table, ...round.tables[table] })
         }
-        for await (const record of source.iterate(sql, { epoch, watermark: round.through.seq, cursor: round.cursor })) {
-          const [payload, deleted, hash] = record.latest as [string, number, string]
-          cursor = String(record.key); batch.push(convert(table, cursor, payload, deleted, hash))
-          if (batch.length >= batchSize) await flush()
-        }
-        if (batch.length) await flush()
         await ensureSource()
         round.tableIndex++; round.cursor = ''; atomicJson(file, checkpoint)
       }
     } else {
       // The old journal is indexed by (source_epoch,seq), so catch-up never rescans all entity versions.
-      const sql = `SELECT seq,payload,hash FROM ${qualified(sourceDatabase, 'tracking_commits')}
+      // Read every copy within a bounded sequence interval, including conflicts at the page boundary.
+      const sql = `SELECT seq,any(tuple(payload,hash)) AS content,uniqExact(tuple(payload,hash)) AS variants FROM ${qualified(sourceDatabase, 'tracking_commits')}
         WHERE source_epoch={epoch:UUID} AND seq>{after:UInt64} AND seq<={through:UInt64}${tail.replaceAll('commit_seq', 'seq')}
-        GROUP BY seq,payload,hash ORDER BY seq`
+        GROUP BY seq ORDER BY seq`
+      // One journal row contains a whole original commit, potentially many business rows.
+      const pageSize = Math.min(batchSize, 32)
       let cursor = round.cursorSeq, scanned = 0
       const batch = new Map<string, Change>()
       const flush = async () => {
@@ -187,39 +196,47 @@ export async function upgradeClickHouse(directory: string, config: AnalyticsConf
         options.progress?.({ mode: round.mode, appliedSeq: cursor, throughSeq: round.through.seq, tables: round.tables })
         batch.clear(); scanned = 0
       }
-      for await (const record of source.iterate(sql, { epoch, after: round.cursorSeq, through: round.through.seq })) {
-        const seq = sequence(record.seq)
-        if (seq !== nextSequence(cursor, origin.excluded)) throw new Error('ANALYTICS_UPGRADE_COMMIT_GAP')
-        let commit: LegacyCommit
-        try {
-          commit = JSON.parse(String(record.payload)) as LegacyCommit
-          if (hashCanonical(commit) !== record.hash || commit.epoch !== epoch || commit.seq !== seq || !commit.versions || typeof commit.versions !== 'object' || Array.isArray(commit.versions)) throw new Error()
-          timestamp(commit.createdAt)
-          if (Object.keys(commit.versions).some(table => table !== 'user_day' && !TABLES.includes(table as TableName))) throw new Error()
-        } catch { throw new Error('ANALYTICS_UPGRADE_INVALID_COMMIT') }
-        const seen = new Set<string>()
-        const commitChanges: Change[] = [], commitTables: UpgradeTables = {}
-        for (const table of TABLES) {
-          const versions = commit.versions[table] ?? []
-          if (!Array.isArray(versions)) throw new Error('ANALYTICS_UPGRADE_INVALID_COMMIT')
-          for (const version of versions) {
-            const key = `${table}:${version.key}`
-            if (version.source_epoch !== epoch || sequence(version.commit_seq) !== seq || seen.has(key)) throw new Error('ANALYTICS_UPGRADE_INVALID_COMMIT')
-            seen.add(key)
-            commitChanges.push(convert(table, version.key, version.payload, version.deleted, version.payload_hash, commitTables))
+      while (nextSequence(cursor, origin.excluded) <= round.through.seq) {
+        const through = Math.min(round.through.seq, nextSequence(cursor, origin.excluded) + pageSize - 1)
+        const records = await source.query(sql, { epoch, after: cursor, through }, { operation: 'table_export' })
+        if (!records.length) break
+        for (const record of records) {
+          const seq = sequence(record.seq)
+          if (seq !== nextSequence(cursor, origin.excluded)) throw new Error('ANALYTICS_UPGRADE_COMMIT_GAP')
+          let commit: LegacyCommit
+          try {
+            if (sequence(record.variants) !== 1 || !Array.isArray(record.content) || record.content.length !== 2) throw new Error()
+            const [payload, hash] = record.content
+            commit = JSON.parse(String(payload)) as LegacyCommit
+            if (hashCanonical(commit) !== hash || commit.epoch !== epoch || commit.seq !== seq || !commit.versions || typeof commit.versions !== 'object' || Array.isArray(commit.versions)) throw new Error()
+            timestamp(commit.createdAt)
+            if (Object.keys(commit.versions).some(table => table !== 'user_day' && !TABLES.includes(table as TableName))) throw new Error()
+          } catch { throw new Error('ANALYTICS_UPGRADE_INVALID_COMMIT') }
+          const seen = new Set<string>()
+          const commitChanges: Change[] = [], commitTables: UpgradeTables = {}
+          for (const table of TABLES) {
+            const versions = commit.versions[table] ?? []
+            if (!Array.isArray(versions)) throw new Error('ANALYTICS_UPGRADE_INVALID_COMMIT')
+            for (const version of versions) {
+              const key = `${table}:${version.key}`
+              if (version.source_epoch !== epoch || sequence(version.commit_seq) !== seq || seen.has(key)) throw new Error('ANALYTICS_UPGRADE_INVALID_COMMIT')
+              seen.add(key)
+              commitChanges.push(convert(table, version.key, version.payload, version.deleted, version.payload_hash, commitTables))
+            }
           }
+          // Never coalesce across a deletion: a later parent reinsertion must not resurrect its old child.
+          const removes = commitChanges.some(change => !change.row)
+          if (removes && cursor !== round.cursorSeq) await flush()
+          for (const [table, counts] of Object.entries(commitTables)) {
+            const total = countsFor(round.tables, table as TableName)
+            total.read += counts.read; total.deleted += counts.deleted; total.expired += counts.expired
+          }
+          for (const change of commitChanges) batch.set(`${change.table}:${change.key}`, change)
+          scanned += commitChanges.length
+          cursor = seq
+          if (removes || scanned >= batchSize) await flush()
         }
-        // Never coalesce across a deletion: a later parent reinsertion must not resurrect its old child.
-        const removes = commitChanges.some(change => !change.row)
-        if (removes && cursor !== round.cursorSeq) await flush()
-        for (const [table, counts] of Object.entries(commitTables)) {
-          const total = countsFor(round.tables, table as TableName)
-          total.read += counts.read; total.deleted += counts.deleted; total.expired += counts.expired
-        }
-        for (const change of commitChanges) batch.set(`${change.table}:${change.key}`, change)
-        scanned += commitChanges.length
-        cursor = seq
-        if (removes || scanned >= batchSize) await flush()
+        if (cursor !== round.cursorSeq) await flush()
       }
       if (nextSequence(cursor, origin.excluded) <= round.through.seq) throw new Error('ANALYTICS_UPGRADE_COMMIT_GAP')
       if (cursor !== round.cursorSeq) await flush()

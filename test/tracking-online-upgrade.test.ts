@@ -8,6 +8,7 @@ import { createServer } from 'node:http'
 import { integrationTest as test, prepareTestDatabase } from './helpers/clickhouse.js'
 import { TABLE_META, canonical, hashCanonical, rowKey, type Change, type Row, type TableName } from '../server/tracking/canonical.js'
 import { ClickHouseHttpClient } from '../server/tracking/clickhouse.js'
+import { ClickHouseTransportError } from '../server/tracking/clickhouse-errors.js'
 import { ENTITY_TABLES, identifier, qualified } from '../server/tracking/clickhouse-schema.js'
 import { TrackingDatabase } from '../server/tracking/database.js'
 import { migrationStatements } from '../server/tracking/clickhouse-migrations.js'
@@ -205,14 +206,15 @@ test('finalize rejects a round older than five minutes and a fresh no-op catch-u
 test('incremental continuity skips declared unpublished intervals and refuses a changed source lineage', async t => {
   const f = await fixture(t)
   await f.source.command(`TRUNCATE TABLE ${qualified(f.sourceDatabase, 'tracking_runtime')}`)
-  const runtime = { epoch: f.epoch, startSeq: 1, excluded: [{ after: 1, through: 3 }], ttlGraceSeconds: 86400 }
+  const runtime = { epoch: f.epoch, startSeq: 1, excluded: [{ after: 1, through: 3 }, { after: 4, through: 6 }], ttlGraceSeconds: 86400 }
   await f.source.insert('tracking_runtime', [{ payload: canonical(runtime) }])
   await f.publish(1, [make('ingestion_health', { code: 'TEST', count: 1 })]); await f.sync()
   await f.publish(2, [make('ingestion_health', { code: 'TEST', count: 99 })], { watermark: false })
   await f.publish(4, [make('ingestion_health', { code: 'TEST', count: 4 })])
-  const incremental = await f.sync()
-  assert.equal(incremental.throughSeq, 4); assert.equal(incremental.tables.ingestion_health?.read, 1)
-  assert.equal((await f.rows('ingestion_health'))[0]!.count, '4')
+  await f.publish(7, [make('ingestion_health', { code: 'TEST', count: 7 })])
+  const incremental = await f.sync({ batchSize: 2 })
+  assert.equal(incremental.throughSeq, 7); assert.equal(incremental.tables.ingestion_health?.read, 2)
+  assert.equal((await f.rows('ingestion_health'))[0]!.count, '7')
   await f.source.command(`TRUNCATE TABLE ${qualified(f.sourceDatabase, 'tracking_runtime')}`)
   await f.source.insert('tracking_runtime', [{ payload: canonical({ ...runtime, excluded: [] }) }])
   await assert.rejects(f.sync({ finalize: true }), /SOURCE_CHANGED/)
@@ -242,4 +244,52 @@ test('baseline older than source TTL grace refuses to resume a potentially incom
   await assert.rejects(f.sync(), /BASELINE_EXPIRED_USE_NEW_TARGET/)
   assert.equal((await f.rows('ingestion_health')).length, 0)
   const blocked = f.start(); await assert.rejects(blocked.ready, /UPGRADE_INCOMPLETE/)
+})
+
+test('bounded source pages finish before target writes can exhaust their HTTP deadline', async t => {
+  const f = await fixture(t)
+  await f.publish(1, Array.from({ length: 5 }, (_, index) => make('ingestion_health', { code: `HEALTH${index}`, count: index })))
+  await f.publish(2, [make('ingestion_health', { code: 'HEALTH0', count: 100 }), remove('ingestion_health', { code: 'HEALTH4' })])
+  const iterate = ClickHouseHttpClient.prototype.iterate, insert = ClickHouseHttpClient.prototype.insert
+  let openResponses = 0
+  const pages: { kind: string; rows: number }[] = []
+  t.mock.method(ClickHouseHttpClient.prototype, 'iterate', async function* (this: ClickHouseHttpClient, ...args: Parameters<typeof iterate>) {
+    const kind = this.database === f.sourceDatabase ? args[0].includes('`ingestion_health_versions`') && args[0].includes('argMax') ? 'baseline' : args[0].includes('`tracking_commits`') ? 'incremental' : undefined : undefined
+    if (!kind) { yield* iterate.apply(this, args); return }
+    const page = { kind, rows: 0 }; pages.push(page); openResponses++
+    try { for await (const row of iterate.apply(this, args)) { page.rows++; yield row } }
+    finally { openResponses-- }
+  })
+  t.mock.method(ClickHouseHttpClient.prototype, 'insert', async function (this: ClickHouseHttpClient, ...args: Parameters<typeof insert>) {
+    // Model a target write that lasts longer than the remaining source response budget.
+    if (this.database === f.target.database && openResponses) throw new ClickHouseTransportError('ANALYTICS_QUERY_TIMEOUT', {
+      phase: 'body', operation: 'table_export', queryId: 'fixture-source-deadline', requestElapsedMs: 300001, attempt: 1, transportCode: 'ABORT_TIMEOUT',
+    })
+    return insert.apply(this, args)
+  })
+  await f.sync({ batchSize: 2 })
+  assert.deepEqual(pages.filter(page => page.kind === 'baseline').map(page => page.rows), [1, 2, 2])
+  assert.deepEqual((await f.rows('ingestion_health')).map(row => [row.code, row.count]), [
+    ['HEALTH0', '100'], ['HEALTH1', '1'], ['HEALTH2', '2'], ['HEALTH3', '3'],
+  ])
+  for (const [seq, code, count] of [[3, 'HEALTH0', 20], [4, 'HEALTH1', 30], [5, 'HEALTH2', 40]] as const) await f.publish(seq, [make('ingestion_health', { code, count })])
+  await f.publish(6, [remove('ingestion_health', { code: 'HEALTH3' })])
+  await f.publish(7, [make('ingestion_health', { code: 'HEALTH3', count: 60 })])
+  const delta = await f.sync({ batchSize: 2, finalize: true })
+  assert.equal(delta.throughSeq, 7); assert.equal(delta.phase, 'armed')
+  assert.deepEqual(pages.filter(page => page.kind === 'incremental').map(page => page.rows), [2, 2, 1])
+  assert.deepEqual((await f.rows('ingestion_health')).map(row => [row.code, row.count]), [
+    ['HEALTH0', '20'], ['HEALTH1', '30'], ['HEALTH2', '40'], ['HEALTH3', '60'],
+  ])
+})
+
+test('conflicting journal copies at a page boundary cannot be skipped by the sequence cursor', async t => {
+  const f = await fixture(t)
+  await f.publish(1, [make('ingestion_health', { code: 'TEST', count: 1 })]); await f.sync()
+  await f.source.command(`SYSTEM STOP MERGES ${qualified(f.sourceDatabase, 'tracking_commits')}`)
+  await f.publish(2, [make('ingestion_health', { code: 'TEST', count: 2 })])
+  await f.publish(2, [make('ingestion_health', { code: 'TEST', count: 99 })])
+  await assert.rejects(f.sync({ batchSize: 1, finalize: true }), /INVALID_COMMIT/)
+  assert.equal(readUpgradeCheckpoint(f.checkpointFile).applied?.seq, 1)
+  assert.equal((await f.rows('ingestion_health'))[0]!.count, '1')
 })
