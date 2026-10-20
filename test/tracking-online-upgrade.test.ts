@@ -11,7 +11,7 @@ import { ClickHouseHttpClient } from '../server/tracking/clickhouse.js'
 import { ClickHouseTransportError } from '../server/tracking/clickhouse-errors.js'
 import { ENTITY_TABLES, identifier, qualified } from '../server/tracking/clickhouse-schema.js'
 import { TrackingDatabase } from '../server/tracking/database.js'
-import { migrationStatements } from '../server/tracking/clickhouse-migrations.js'
+import { legacySchemaStatements } from './helpers/clickhouse-legacy.js'
 import { atomicJson } from '../server/tracking/durable-file.js'
 import { cutoverLag, MAX_CUTOVER_LAG_MS, readUpgradeCheckpoint } from '../server/tracking/upgrade-state.js'
 import { upgradeClickHouse } from '../scripts/tracking/upgrade.js'
@@ -35,7 +35,7 @@ async function fixture(t: TestContext) {
     finally { source.close(); target.close(); await rm(root, { recursive: true, force: true }) }
   })
   await source.command(`CREATE DATABASE ${identifier(sourceDatabase)}`, {}, { database: 'default' })
-  for (const ddl of migrationStatements('0001_tracking_baseline', sourceDatabase)) await source.command(ddl)
+  for (const ddl of legacySchemaStatements(sourceDatabase)) await source.command(ddl)
   await source.insert('projection_manifest', [{ epoch, projection_id: 'legacy', baseline_seq: '0', manifest_hash: hashCanonical('legacy'), ttl_grace_seconds: 86400 }])
   await source.insert('tracking_runtime', [{ payload: canonical({ epoch, startSeq: 1, excluded: [], ttlGraceSeconds: 86400 }) }])
   await source.insert('published_watermarks', [{ epoch, seq: '0', hash: hashCanonical('legacy'), baseline: 1 }])

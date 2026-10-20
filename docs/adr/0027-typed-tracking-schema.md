@@ -10,7 +10,7 @@
 
 这同时撤销新后端的固定水位快照和数据库提交日志设计。新结构只保存业务当前状态，需要单进程串行读写、失败批次本地恢复，不能继续宣称具备跨表数据库事务或历史快照能力。在线迁移只读取旧源已有的水位与日志，增量断点保存在本地文件，不将这些控制表重新建到目标库。
 
-交付包括 [SQLite 历史结构](../design/tracking-v2/sqlite-v3-reference.sql)、[目标 DDL（逐字段中文注释）](../design/tracking-v2/schema.sql)、[当前状态视图](../design/tracking-v2/views.sql)、[使用及验证说明](../design/tracking-v2/README.md)、[迁移方案](../runbooks/tracking-typed-migration.md)。运行 DDL 已落入 `db/clickhouse/migrations/0003_tracking_typed.sql` 与 `db/clickhouse/schema.sql`；新库 init 只执行 0003，0001/0002 保留为旧库来源定义。设计目录保留评审 SQL 快照，不重复作为运行 migration 加载。
+交付包括 [SQLite 历史结构](../design/tracking-v2/sqlite-v3-reference.sql)、[目标 DDL（逐字段中文注释）](../design/tracking-v2/schema.sql)、[当前状态视图](../design/tracking-v2/views.sql)、[使用及验证说明](../design/tracking-v2/README.md)、[迁移方案](../runbooks/tracking-typed-migration.md)。运行 DDL 已落入 `db/clickhouse/migrations/0001_tracking_typed.sql` 与 `db/clickhouse/schema.sql`；类型化结构作为唯一初始迁移记录，旧布局定义仅保留在测试夹具中。此次重新编号不改变 DDL 或已有迁移断点。设计目录保留评审 SQL 快照，不重复作为运行 migration 加载。
 
 ## 历史依据与当前问题
 

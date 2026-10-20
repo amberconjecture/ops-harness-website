@@ -13,7 +13,7 @@ import { dayAt } from '../server/tracking/types.js'
 import { TrackingDatabase } from '../server/tracking/database.js'
 import { ClickHouseHttpClient, grantTypedAccess } from '../server/tracking/clickhouse.js'
 import { qualified, identifier } from '../server/tracking/clickhouse-schema.js'
-import { migrationStatements } from '../server/tracking/clickhouse-migrations.js'
+import { legacySchemaStatements } from './helpers/clickhouse-legacy.js'
 import { upgradeClickHouse } from '../scripts/tracking/upgrade.js'
 
 function writeSource(file: string, state: State) {
@@ -97,7 +97,7 @@ test('online baseline preserves published state, excludes tails and tombstones, 
   let db: TrackingDatabase | undefined
   try {
     await client.command(`CREATE DATABASE ${identifier(sourceDatabase)}`, {}, { database: 'default' })
-    for (const ddl of migrationStatements('0001_tracking_baseline', sourceDatabase)) await client.command(ddl)
+    for (const ddl of legacySchemaStatements(sourceDatabase)) await client.command(ddl)
     await client.insert('projection_manifest', [{ epoch, projection_id: 'legacy', baseline_seq: '0', manifest_hash: hashCanonical('legacy'), ttl_grace_seconds: 86400 }])
     await client.insert('tracking_runtime', [{ payload: canonical({ epoch, startSeq: 1, excluded: [{ after: 1, through: 3 }], ttlGraceSeconds: 86400 }) }])
     const version = (seq: number, count: number) => ({ source_epoch: epoch, key: rowKey('ingestion_health', { code: 'TEST' }), commit_seq: String(seq), deleted: 0, payload: canonical({ code: 'TEST', count }), payload_hash: hashCanonical({ code: 'TEST', count }), retention_day: '', partition_date: '1970-01-01', physical_delete_at: '2106-02-07 06:28:15' })
@@ -178,7 +178,7 @@ test('online baseline counts expired runtime children as retention but refuses h
   const version = (table: TableName, row: Row) => ({ source_epoch: epoch, key: rowKey(table, row), commit_seq: '1', deleted: 0, payload: canonical(row), payload_hash: hashCanonical(row), retention_day: '', partition_date: '1970-01-01', physical_delete_at: '2106-02-07 06:28:15' })
   try {
     await client.command(`CREATE DATABASE ${identifier(sourceDatabase)}`, {}, { database: 'default' })
-    for (const ddl of migrationStatements('0001_tracking_baseline', sourceDatabase)) await client.command(ddl)
+    for (const ddl of legacySchemaStatements(sourceDatabase)) await client.command(ddl)
     await client.insert('projection_manifest', [{ epoch, projection_id: 'legacy', baseline_seq: '0', manifest_hash: hashCanonical('legacy'), ttl_grace_seconds: 86400 }])
     await client.insert('tracking_runtime', [{ payload: canonical({ epoch, startSeq: 1, excluded: [], ttlGraceSeconds: 86400 }) }])
     await client.insert('published_watermarks', [{ epoch, seq: '1', hash: hashCanonical('legacy'), baseline: 0 }])

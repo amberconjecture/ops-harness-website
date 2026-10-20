@@ -176,7 +176,7 @@ writer 的 ALTER DELETE 用于维护，两个 system 表的 SELECT 用于故障�
 
 ## 新部署与 SQLite 补数
 
-全新空库使用 `pnpm tracking init`，该命令创建并校验 0003 类型化结构及已有账号权限。0001/0002 作为旧布局历史文件保留，不在新库执行。结构检查由实际 system.columns / system.tables 完成，没有 schema_version 或 schema_migrations 表。
+全新空库使用 `pnpm tracking init`，该命令创建并校验 `0001_tracking_typed.sql` 定义的类型化结构及已有账号权限。旧布局定义仅作为测试夹具保留。此次迁移记录重新编号不改变实际 DDL，已有目标库和迁移断点无需重建。结构检查由实际 system.columns / system.tables 完成，没有 schema_version 或 schema_migrations 表。
 
 保留显式离线 `pnpm tracking backfill --sqlite /path/analytics.sqlite --since '2026-10-18T10:00:00+08:00'`，用于选定时间窗口的 SQLite 补数；源只读，需停服，旧 user_day 不导入，无时间的健康累计计数仍按该命令原规则跳过。它不是当前 CH 升级所需步骤，也不支持从空库自动补齐全部 SQLite 历史。SQLite 选中的现存超期行可先导入，之后按正常维护删除，不在补数过程额外改变源可见范围。
 

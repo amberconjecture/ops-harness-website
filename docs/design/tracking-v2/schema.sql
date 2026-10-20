@@ -1,4 +1,4 @@
--- Review snapshot. Runtime source: db/clickhouse/migrations/0003_tracking_typed.sql.
+-- Review snapshot. Runtime source: db/clickhouse/migrations/0001_tracking_typed.sql.
 -- Use a NEW isolated database and a validated, quoted {{database}} identifier.
 -- Column names match SQLite v3 for the ten retained business tables.
 -- No version columns, tombstones, control tables, or automatic TTL.

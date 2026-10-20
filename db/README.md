@@ -6,13 +6,12 @@
 db/clickhouse/
   schema.sql                         # 当前 10 张类型化业务表和 10 个当前视图
   migrations/
-    0001_tracking_baseline.sql        # 旧 key/payload 布局，保留历史文件
-    0002_tracking_retention.sql       # 旧布局 TTL，保留历史文件
-    0003_tracking_typed.sql           # 新布局；新库初始化只执行本文件
+    0001_tracking_typed.sql           # 类型化结构的初始记录；新库初始化执行本文件
 ```
 
 - `schema.sql` 是当前结构快照，与 `CURRENT_MIGRATIONS` 的执行结果一致。每次结构变化更新快照、执行入口、测试和升级步骤。
-- 编号 migration 不修改、不重排、不删除已发布文件；0001/0002 是从原初始化代码提取的基线，0003 采用独立新库切换，不在旧库上清空重建。
+- 迁移记录以类型化结构重新建立基线：仅保留 `0001_tracking_typed.sql`，后续从 0002 追加。旧 key/payload 建表定义仅存于 `test/fixtures/clickhouse-legacy-schema.sql`，用于模拟在线迁移源库，不随构建发布。
+- 此次整理只调整 SQL 文件及加载清单，类型化 DDL 内容不变；已有目标库和迁移断点无需重建。旧库仍通过独立新库切换。
 - `pnpm tracking init` 只创建和验证新结构；遇到旧版本表会拒绝。已有 key/payload 数据使用 `pnpm tracking upgrade --source-database OLD_DB`，无需先运行 init。
 - upgrade 保持旧实例在线，配置指向独立目标库/目录；首轮全量，后续同命令只追平新增提交（含更新、删除）。最终 `--finalize` 校验 5 分钟窗口，启动新实例并在报告期限前切换、排空旧流量。目标第一次业务写入后不再允许旧库导入；断点保存在本地文件，不添加数据库控制表。
 - 构建将整个 db 复制到 dist/db，编译后的 CLI 和运行代码从该位置加载，不依赖当前工作目录。

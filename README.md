@@ -333,6 +333,6 @@ WeLink 个人资料随事件上报后，用户明细、排名和操作明细显�
 
 ## 数据库 DDL 管理
 
-ClickHouse 当前 schema 与编号 migration 统一保存在 [`db/clickhouse`](db/README.md)，MySQL 使用独立预留目录。初始化读取 0003 类型化 SQL，构建同步到 `dist/db`；0001/0002 保留为历史基线。新增 migration 须同时补充已有库升级路径，不能仅添加 SQL 文件。
+ClickHouse 当前 schema 与编号 migration 统一保存在 [`db/clickhouse`](db/README.md)，MySQL 使用独立预留目录。初始化读取 `0001_tracking_typed.sql`，构建同步到 `dist/db`；旧 key/payload 建表定义仅作为测试夹具保留。新增 migration 须同时补充已有库升级路径，不能仅添加 SQL 文件。
 
 将通用 JSON 实体表恢复为明确业务列的设计见 [ADR 0027](docs/adr/0027-typed-tracking-schema.md)，附 [SQL 评审快照与隔离验证](docs/design/tracking-v2/README.md)、[升级与回退步骤](docs/runbooks/tracking-typed-migration.md)。类型化读写、查询、恢复、定期清理及在线全量/增量升级 CLI 已实现；尚未对生产库执行升级。

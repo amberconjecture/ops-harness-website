@@ -36,7 +36,7 @@ export async function validateTypedSchema(client: ClickHouseHttpClient) {
   return String(database.uuid)
 }
 
-/** New databases only. Historical 0001/0002 remain immutable offline source definitions. */
+/** Initialize or validate typed databases. Legacy layouts must use the online upgrade. */
 export async function initializeClickHouse(client: ClickHouseHttpClient) {
   await client.command(`CREATE DATABASE IF NOT EXISTS ${identifier(client.database)} ENGINE=Atomic`, {}, { database: 'default' })
   const existing = await client.query('SELECT name FROM system.tables WHERE database={database:String}', { database: client.database })

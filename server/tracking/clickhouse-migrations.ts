@@ -1,9 +1,9 @@
 import { readFileSync } from 'node:fs'
 import { identifier } from './clickhouse-schema.js'
 
-export const MIGRATIONS = ['0001_tracking_baseline', '0002_tracking_retention', '0003_tracking_typed'] as const
+export const MIGRATIONS = ['0001_tracking_typed'] as const
 
-export const CURRENT_MIGRATIONS = ['0003_tracking_typed'] as const
+export const CURRENT_MIGRATIONS = MIGRATIONS
 
 /** Repository SQL uses one statement per semicolon; no semicolons inside literals/comments. */
 export function migrationStatements(name: typeof MIGRATIONS[number], database: string): string[] {
