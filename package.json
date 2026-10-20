@@ -6,7 +6,7 @@
   "description": "WiseOperation Assistant website and release service",
   "scripts": {
     "dev": "node scripts/prepare-assets.mjs && tsx watch server/main.ts --dev",
-    "build": "node scripts/prepare-assets.mjs && vite build && tsc -p tsconfig.server.json && node scripts/copy-guide.mjs",
+    "build": "node scripts/prepare-assets.mjs && vite build && tsc -p tsconfig.server.json && node scripts/copy-guide.mjs && node scripts/copy-db.mjs",
     "start": "node dist/server/main.js",
     "typecheck": "vue-tsc --noEmit -p tsconfig.json && tsc -p tsconfig.server.json --noEmit",
     "test": "tsx --test test/*.test.ts",

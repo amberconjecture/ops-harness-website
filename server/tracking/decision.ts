@@ -45,7 +45,8 @@ export function decideIngest(state: State, installation: Installation, inputs: u
   const reject = (id: string, code: string) => {
     result.rejected.push({ id, code, retryable: false })
     const old = view.find('ingestion_health', row => row.code === code)
-    view.put('ingestion_health', { code, count: Number(old?.count ?? 0) + 1 })
+    const count = BigInt(old?.count ?? 0) + 1n
+    view.put('ingestion_health', { code, count: count <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(count) : String(count) })
   }
   const oldInstallation = view.find('installations', row => row.tenant === tenant && row.installation === installation.installationId)
   view.put('installations', oldInstallation ? { ...oldInstallation, last_seen: receivedAt } : { tenant, installation: installation.installationId, environment: installation.environment, last_seen: receivedAt })
@@ -75,14 +76,6 @@ export function decideIngest(state: State, installation: Installation, inputs: u
     }
     if (event.operationId && event.action) {
       let operation = view.find('operations', row => row.tenant === tenant && row.installation === installation.installationId && row.operation === event.operationId)
-      if (operation) {
-        const terminal = operation.terminal === null ? null : JSON.parse(String(operation.terminal)) as TrackingEvent
-        const accepted = operation.accepted === null ? null : JSON.parse(String(operation.accepted)) as TrackingEvent
-        const occurredAt = terminal?.occurredAt ?? accepted?.occurredAt
-        if (occurredAt !== undefined && occurredAt < new Date(now - 120 * DAY).toISOString()) {
-          view.remove('operations', operation); operation = undefined
-        }
-      }
       const base = operation ?? { tenant, installation: installation.installationId, operation: event.operationId, accepted: null, terminal: null, terminal_digest: null }
       if (event.eventName === 'operation.accepted') {
         if (operation?.accepted) { reject(id, 'ACCEPTED_OPERATION_CONFLICT'); continue }

@@ -12,7 +12,6 @@ export const TABLE_META = {
   activity_facts: definition('tenant,id,user_id,installation,day,occurred_at,environment,platform,app_version,feature,action,event_name,initiator,interaction,operation,outcome,active,success,pending', 'tenant,id'),
   runtime_facts: definition('tenant,id,conversation,turn,step,session_kind,provider,model,usage_reported,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,reasoning_tokens,skill_name,method,result', 'tenant,id'),
   tracking_events: definition('tenant,id,body,received_at', 'tenant,id'),
-  user_day: definition('tenant,day,user_id,environment,active,logins,interactions,successes', 'tenant,day,user_id,environment'),
   ingestion_health: definition('code,count', 'code'),
 } as const
 export type TableName = keyof typeof TABLE_META

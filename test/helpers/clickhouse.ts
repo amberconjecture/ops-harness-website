@@ -37,6 +37,5 @@ export async function createTestDatabase(directory: string, now = Date.now) {
 }
 export async function createTestStore(directory: string) {
   const store = new TrackingStore(directory, await prepareTestDatabase(directory))
-  await store.maintain()
-  return store
+  try { await store.maintain(); return store } catch (error) { await store.close(); throw error }
 }

@@ -29,7 +29,7 @@ export class TrackingStore {
     if (this.stopped || this.pending.size >= this.config.maxQueuedRequests) return Promise.reject(new Error('ANALYTICS_BUSY'))
     const id = ++this.sequence
     return new Promise((resolve, reject) => {
-      const timeout = method === 'query' ? this.config.queryTimeoutMs : this.config.writeTimeoutMs
+      const timeout = method === 'query' || method === 'readiness' ? this.config.queryTimeoutMs : this.config.writeTimeoutMs
       const deadline = Date.now() + timeout
       const timer = setTimeout(() => { this.pending.delete(id); reject(new Error('ANALYTICS_TIMEOUT')) }, timeout)
       this.pending.set(id, { resolve, reject, timer }); this.worker.postMessage({ id, method, args, deadline })
@@ -39,5 +39,6 @@ export class TrackingStore {
   identity(...args: Parameters<TrackingDatabase['identity']>) { return this.call<Awaited<ReturnType<TrackingDatabase['identity']>>>('identity', ...args) }
   query(...args: Parameters<TrackingDatabase['query']>) { return this.call<Awaited<ReturnType<TrackingDatabase['query']>>>('query', ...args) }
   maintain() { return this.call<void>('maintain') }
+  readiness() { return this.call<void>('readiness') }
   async close() { try { if (!this.stopped) await this.call('close') } finally { this.stopped = true; await this.worker.terminate() } }
 }

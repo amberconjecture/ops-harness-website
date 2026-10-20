@@ -34,6 +34,7 @@ export class TrackingDatabase {
   }
   ingest(installation: Installation, inputs: unknown[], deadline?: number) {
     return this.exclusive(async () => {
+      await this.backend.beforeRequest(true)
       const at = this.now(), state = emptyState(), tenant = installation.tenantId
       const events = inputs.flatMap(input => { const parsed = EventSchema.safeParse(input); return parsed.success ? [parsed.data] : [] })
       const identities = events.flatMap(event => event.employee ? [{ tenant, issuer: event.employee.source, subject: event.employee.employeeId }] : [])
@@ -62,12 +63,13 @@ export class TrackingDatabase {
         state.users = [...users.values()]
       }
       const decision = decideIngest(state, installation, inputs, at)
-      await this.backend.commit(decision.changes)
+      await this.backend.commit(decision.changes, decision.result)
       return decision.result
     }, deadline)
   }
   identity(installation: Installation, principal: Principal, deadline?: number) {
     return this.exclusive(async () => {
+      await this.backend.beforeRequest(true)
       const at = this.now(), state = emptyState(), params = { tenant: installation.tenantId, issuer: principal.issuer, subject: principal.subject }
       const predicate = 'tenant={tenant:String} AND issuer={issuer:String} AND subject={subject:String}'
       ;[state.users, state.user_identities] = await Promise.all([
@@ -75,12 +77,20 @@ export class TrackingDatabase {
         this.backend.rows('user_identities', { keys: [rowKey('user_identities', params)] }, at),
       ])
       const decision = decideIdentity(state, installation, principal, at)
-      await this.backend.commit(decision.changes)
+      await this.backend.commit(decision.changes, decision.result)
       return decision.result
     }, deadline)
   }
-  async query(kind: string, query: AnalyticsQuery) { await this.ready; return this.backend.query(kind, query) }
-  maintain() { return this.exclusive(async () => { /* ClickHouse TTL and logical query cutoffs handle retention. */ }) }
+  query(kind: string, query: AnalyticsQuery) {
+    return this.exclusive(async () => { await this.backend.beforeRequest(); return this.backend.query(kind, query) }, Date.now() + this.config.queryTimeoutMs)
+  }
+  readiness() {
+    return this.exclusive(async () => {
+      await this.backend.beforeRequest()
+      await Promise.all([this.backend.client.query('SELECT 1'), this.backend.reader.query('SELECT 1')])
+    }, Date.now() + this.config.queryTimeoutMs)
+  }
+  maintain() { return this.exclusive(() => this.backend.maintain()) }
   async close() {
     if (this.closing) return
     this.closing = true

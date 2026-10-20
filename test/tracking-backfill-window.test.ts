@@ -85,10 +85,6 @@ test('time-window backfill filters all tables, includes delayed receipts and dep
       row('operations', { tenant: 't', installation: 'i', operation: 'fallback', terminal: JSON.stringify({ occurredAt: after }) }),
       row('operations', { tenant: 't', installation: 'i', operation: 'bad-json', accepted: '{broken-json' }),
     )
-    for (const day of [dayAt(cutoff - 86400000), cutoffDay, dayAt(cutoff + 86400000)]) {
-      source.user_day.push(row('user_day', { tenant: 't', day, user_id: 'active', environment: 'test', active: 1 }))
-    }
-    source.user_day.push(row('user_day', { tenant: 't', day: cutoffDay, user_id: 'daily', environment: 'test', active: 1 }))
     source.ingestion_health.push(row('ingestion_health', { code: 'INVALID_EVENT', count: 100 }))
     source.tracking_events.push(row('tracking_events', { tenant: 't', id: 'bad-time', body: '{}', received_at: 'invalid' }))
     source.runtime_facts.push(row('runtime_facts', { tenant: 't', id: 'orphan' }))
@@ -96,9 +92,9 @@ test('time-window backfill filters all tables, includes delayed receipts and dep
     const original = await readFile(file), target = destination(seed)
     const report = await backfillSqlite(file, target.target, { since, batchSize: 1 })
     const actual = target.state(), ids = (table: TableName, field = 'id') => actual[table].map(value => value[field]).sort()
-    assert.deepEqual(ids('users'), ['already-migrated', 'daily', 'profile', 'session'])
+    assert.deepEqual(ids('users'), ['already-migrated', 'profile', 'session'])
     assert.equal(actual.users.find(value => value.id === 'already-migrated')!.display_name, 'newer-profile')
-    assert.deepEqual(ids('user_identities', 'subject'), ['active', 'daily', 'profile', 'session'])
+    assert.deepEqual(ids('user_identities', 'subject'), ['active', 'profile', 'session'])
     assert.deepEqual(ids('installations', 'installation'), ['after', 'boundary'])
     assert.deepEqual(ids('identity_sessions', 'ref'), ['after', 'boundary'])
     assert.deepEqual(ids('event_dedup'), ['after', 'boundary'])
@@ -107,7 +103,6 @@ test('time-window backfill filters all tables, includes delayed receipts and dep
     assert.deepEqual(ids('runtime_facts'), ids('activity_facts'))
     assert.ok(actual.activity_facts.every(value => value.user_id === 'already-migrated'))
     assert.deepEqual(ids('operations', 'operation'), ['delayed', 'fallback', 'resolved'])
-    assert.deepEqual(ids('user_day', 'day'), [cutoffDay, cutoffDay, dayAt(cutoff + 86400000)])
     assert.equal(actual.ingestion_health.length, 0)
     assert.equal(report.find(value => value.table === 'ingestion_health')!.skipReason, 'NO_TIME_COLUMN')
     assert.equal(report.find(value => value.table === 'tracking_events')!.read, 3)
@@ -129,10 +124,13 @@ test('missing receipt/context tables use fact time without full-copying undated 
     writeSource(file, source)
     const sqlite = new DatabaseSync(file)
     sqlite.exec('DROP TABLE event_dedup; DROP TABLE tracking_events; DROP TABLE operations; DROP TABLE identity_sessions; ALTER TABLE users DROP COLUMN profile_updated_at')
+    sqlite.prepare('UPDATE runtime_facts SET input_tokens=?, output_tokens=? WHERE id=?').run(9223372036854775807n, -9223372036854775808n, 'new')
     sqlite.close()
     const target = destination(), report = await backfillSqlite(file, target.target, { since })
     assert.deepEqual(target.state().activity_facts.map(value => value.id), ['new'])
     assert.deepEqual(target.state().runtime_facts.map(value => value.id), ['new'])
+    assert.equal(target.state().runtime_facts[0]!.input_tokens, '9223372036854775807')
+    assert.equal(target.state().runtime_facts[0]!.output_tokens, '-9223372036854775808')
     assert.deepEqual(target.state().users.map(value => value.id), ['u'])
     assert.equal(report.filter(value => value.missingTable).length, 4)
   } finally { await rm(root, { recursive: true, force: true }) }

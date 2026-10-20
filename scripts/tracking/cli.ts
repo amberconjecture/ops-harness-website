@@ -2,7 +2,7 @@ import { parseArgs } from 'node:util'
 import path from 'node:path'
 import { getHeapStatistics } from 'node:v8'
 import { loadConfig } from '../../server/config.js'
-import { ClickHouseHttpClient, initializeClickHouse } from '../../server/tracking/clickhouse.js'
+import { ClickHouseHttpClient, initializeClickHouse, grantTypedAccess } from '../../server/tracking/clickhouse.js'
 import { TrackingDatabase } from '../../server/tracking/database.js'
 import { acquireTrackingLock } from '../../server/tracking/lock.js'
 import { parseBackfillSince } from './backfill-time.js'
@@ -11,12 +11,25 @@ import { trackingCommandFailure, type TrackingCommandContext } from './errors.js
 
 const context: TrackingCommandContext = { stage: 'arguments' }
 async function main() {
-  const { values, positionals } = parseArgs({ allowPositionals: true, options: { config: { type: 'string' }, sqlite: { type: 'string' }, since: { type: 'string' }, 'batch-size': { type: 'string' }, 'timeout-ms': { type: 'string' }, help: { type: 'boolean' } } })
+  const { values, positionals } = parseArgs({ allowPositionals: true, options: { config: { type: 'string' }, sqlite: { type: 'string' }, since: { type: 'string' }, 'source-database': { type: 'string' }, finalize: { type: 'boolean' }, 'batch-size': { type: 'string' }, 'timeout-ms': { type: 'string' }, help: { type: 'boolean' } } })
   if (values.help) {
-    console.log('pnpm tracking init [--config /path/website.json] [--timeout-ms 300000]\npnpm tracking backfill --sqlite /path/analytics.sqlite --since "2026-10-18T10:00:00+08:00" [--config /path/website.json] [--batch-size 500] [--timeout-ms 300000]\n--since is required, timezone-qualified and inclusive. Related identities/context are included; daily totals include the cutoff day; undated health counters are skipped.\npnpm tracking starts Node with a 16384 MiB old-space limit. --timeout-ms sets each ClickHouse request/read budget (1000-300000 ms, default 300000); there is no overall migration deadline.\nStop the previous website writer before init and final backfill. The SQLite source is opened read-only.'); return
+    console.log([
+      'pnpm tracking upgrade --source-database OLD_DB [--config /path/website.next.json] [--batch-size 500] [--timeout-ms 300000] [--finalize]',
+      'pnpm tracking maintain [--config /path/website.json]',
+      'pnpm tracking init [--config /path/website.json] [--timeout-ms 300000]',
+      'pnpm tracking backfill --sqlite /path/analytics.sqlite --since "2026-10-18T10:00:00+08:00" [--config /path/website.json] [--batch-size 500] [--timeout-ms 300000]',
+      'upgrade keeps the old ClickHouse writer online. Use a new target database and analyticsDirectory; keep the target service stopped while copying.',
+      'Repeat upgrade for incremental catch-up. --finalize arms cutover only when lag is at most five minutes. Start the new instance, check GET /api/tracking/ready, and switch/drain old traffic before cutoverDeadline.',
+      'Startup/readiness does not activate the target. The first business write rechecks the deadline and permanently prevents further imports from the old database.',
+      '--since is required, timezone-qualified and inclusive. Related identities/context are included; user_day is not imported; undated health counters are skipped in SQLite time-window backfill.',
+      'pnpm tracking starts Node with a 16384 MiB old-space limit. --timeout-ms sets each ClickHouse request/read budget (1000-300000 ms, default 300000). A baseline must finish within the old TTL grace; incremental logs must still be retained.',
+      'init, maintain and SQLite backfill require the target website writer to be stopped. The SQLite source is opened read-only.',
+    ].join('\n')); return
   }
   const command = positionals[0]
-  if (positionals.length !== 1 || !['init', 'backfill'].includes(command!)) throw new Error('EXPECTED_INIT_OR_BACKFILL')
+  if (positionals.length !== 1 || !['init', 'backfill', 'upgrade', 'maintain'].includes(command!)) throw new Error('EXPECTED_INIT_BACKFILL_UPGRADE_OR_MAINTAIN')
+  if (command === 'upgrade' && !values['source-database']) throw new Error('SOURCE_DATABASE_REQUIRED')
+  if (values.finalize && command !== 'upgrade') throw new Error('FINALIZE_REQUIRES_UPGRADE')
   if (command === 'backfill' && !values.sqlite) throw new Error('SQLITE_SOURCE_REQUIRED')
   const since = command === 'backfill' ? parseBackfillSince(values.since) : undefined
   const timeoutMs = parseTrackingTimeout(values['timeout-ms'])
@@ -33,15 +46,24 @@ async function main() {
     try {
       context.stage = 'init'
       const state = await initializeClickHouse(client)
-      console.log(JSON.stringify({ step: 'initialized', database: connection.database, epoch: state.epoch, startSeq: state.startSeq }))
+      await grantTypedAccess(client, connection)
+      console.log(JSON.stringify({ step: 'initialized', database: connection.database, uuid: state.uuid }))
     } finally { client.close(); unlock() }
     return
   }
-  context.stage = 'backfill'
+  if (command === 'upgrade') {
+    context.stage = 'upgrade'
+    const { upgradeClickHouse } = await import('./upgrade.js')
+    const report = await upgradeClickHouse(config.analyticsDirectory, analytics, values['source-database']!, { batchSize: Number(values['batch-size'] ?? 500), finalize: values.finalize ?? false, progress: counts => console.log(JSON.stringify({ step: 'upgrade', ...counts as object })) })
+    console.log(JSON.stringify({ step: 'complete', database: analytics.clickhouse.database, ...report })); return
+  }
+  context.stage = command === 'maintain' ? 'maintain' : 'backfill'
   const store = new TrackingDatabase(config.analyticsDirectory, analytics)
   try {
     await store.ready
+    if (command === 'maintain') { await store.maintain(); console.log(JSON.stringify({ step: 'complete', command })); return }
     // SQLite is loaded only for this explicit offline command, never by the website or init.
+    await store.backend.beforeRequest(true)
     const { backfillSqlite } = await import('./backfill.js')
     const report = await backfillSqlite(path.resolve(values.sqlite!), store.backend, {
       since: since!,

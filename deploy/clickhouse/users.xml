@@ -12,9 +12,12 @@
       <networks><ip>::/0</ip></networks>
       <profile>default</profile><quota>default</quota>
       <grants>
-        <query>GRANT SELECT, INSERT ON website_analytics_dual.*</query>
-        <query>GRANT SELECT, INSERT ON website_analytics_primary.*</query>
+        <query>GRANT SELECT, INSERT, ALTER DELETE ON website_analytics_dual.*</query>
+        <query>GRANT SELECT, INSERT, ALTER DELETE ON website_analytics_primary.*</query>
+        <query>GRANT SELECT, INSERT, ALTER DELETE ON website_analytics_typed.*</query>
         <query>GRANT SELECT ON system.disks</query>
+        <query>GRANT SELECT ON system.processes</query>
+        <query>GRANT SELECT ON system.mutations</query>
       </grants>
     </analytics_writer>
     <analytics_reader>
@@ -24,6 +27,7 @@
       <grants>
         <query>GRANT SELECT ON website_analytics_dual.*</query>
         <query>GRANT SELECT ON website_analytics_primary.*</query>
+        <query>GRANT SELECT ON website_analytics_typed.*</query>
       </grants>
     </analytics_reader>
   </users>

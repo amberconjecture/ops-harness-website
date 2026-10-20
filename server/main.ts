@@ -1,3 +1,4 @@
+import { scheduleTrackingMaintenance } from './tracking/maintenance.js'
 import { createServer } from 'node:http'
 import { createHash } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
@@ -34,9 +35,8 @@ const videoApi = createVideoHandler(videos)
 const analytics = new TrackingStore(config.analyticsDirectory, config.analytics)
 const tracking = createTrackingHandlers(analytics, { enabled: config.trackingEnabled, defaultEnvironment: dev ? 'development' : 'production' })
 const contentAdmin = createAdminHandler(new ReleaseAdmin(config.releaseDirectory), media, sync, knowledge, experts, videos)
-const maintenance = setInterval(() => void analytics.maintain().catch(() => {}), 3600000)
-maintenance.unref()
 await analytics.maintain()
+const stopMaintenance = scheduleTrackingMaintenance(analytics, error => console.warn('[tracking]', JSON.stringify({ phase: 'maintenance', error })))
 const guideApi = await createGuideHandler(guides, { origin: config.websiteUrl, password, admin: async (...args) => await tracking.admin(...args) || await contentAdmin(...args) })
 const guide: typeof guideApi = async (req, res, url) => await tracking.collect(req, res, url) || await videoApi(req, res, url) || await media.serve(req, res, url) || await guideApi(req, res, url)
 const server = createServer()
@@ -68,7 +68,7 @@ async function close() {
   closing = true
   const deadline = setTimeout(() => { server.closeAllConnections(); process.exit(1) }, 5000)
   deadline.unref()
-  clearInterval(maintenance)
+  stopMaintenance()
   await analytics.close()
   await vite?.close()
   server.close(() => { clearTimeout(deadline) })

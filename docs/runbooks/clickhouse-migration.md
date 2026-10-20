@@ -1,5 +1,7 @@
 # ClickHouse 单库切换与补数
 
+> 本页保留旧布局的切换记录。2026-10-20 类型化版本请使用 [新的升级与清理手册](tracking-typed-migration.md)；不要按本页向旧库执行新版本 init。
+
 适用状态：生产已回退到 `common/main`，继续写 `analytics.sqlite`；此前数据已迁入 ClickHouse。此分支从 `common/main` 开发，服务只读写 ClickHouse。无需重新执行旧版 snapshot / migrate / verify / handoff 流程。
 
 ## 1. 准备代码和配置
@@ -153,3 +155,7 @@ pnpm build
 测试只创建和删除 `website_test_<uuid>` 隔离数据库，账号需有该测试库的创建/删除权限。未设置 `CH_TEST_URL` 时，真实数据库测试明确标为跳过；CI 固定启动隔离 ClickHouse 并执行它们。测试覆盖写入与查询、员工资料、乱序终态、重试、中断恢复、旧版本表接管和重复补数；不向生产库写入测试事件。
 
 HTTP 同步插入及响应规则参考 [ClickHouse HTTP 文档](https://clickhouse.com/docs/interfaces/http)；版本去重查询参考 [ReplacingMergeTree 文档](https://clickhouse.com/docs/engines/table-engines/mergetree-family/replacingmergetree)。
+
+## 数据库 DDL 管理
+
+ClickHouse 当前 schema 与编号 migration 统一保存在 [`db/clickhouse`](../../db/README.md)，MySQL 使用独立预留目录。初始化直接读取版本化 SQL，构建同步到 `dist/db`；执行顺序及现有接管行为不变。新增 migration 须同时补充已有库升级路径，不能仅添加 SQL 文件。

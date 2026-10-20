@@ -23,45 +23,25 @@ test('offline timeout has a bounded five-minute default and does not mutate webs
   assert.equal(offline.writeTimeoutMs, online.writeTimeoutMs)
 })
 
-test('offline request budget reaches DDL, startup, reads, prior versions, INSERTs and recovery', async t => {
-  const root = await mkdtemp(path.join(tmpdir(), 'tracking-resources-'))
+test('offline HTTP budget reaches commands, buffered reads and inserts', async t => {
   const variable = 'CH_RESOURCE_TEST_PASSWORD'; process.env[variable] = 'fixture-only'
   const config = AnalyticsConfigSchema.parse({ clickhouse: { writerPasswordEnv: variable, readerPasswordEnv: variable } })
-  const nativeTimeout = AbortSignal.timeout, budgets: number[] = [], requests: string[] = []
+  const nativeTimeout = AbortSignal.timeout, budgets: number[] = []
   t.mock.method(AbortSignal, 'timeout', (milliseconds: number) => { budgets.push(milliseconds); return nativeTimeout(milliseconds) })
-  const state = { epoch: 'a0623ae2-5093-4bb2-8aef-bc85e6617ab7', startSeq: 1, excluded: [], ttlGraceSeconds: 86400 }
-  let interrupt = true
-  t.mock.method(globalThis, 'fetch', async (_url: unknown, options: RequestInit) => {
-    const sql = String(options.body); requests.push(sql)
-    if (sql.includes('SELECT DISTINCT payload')) return new Response(JSON.stringify({ payload: JSON.stringify(state) }) + '\n')
-    if (sql.includes('SELECT max(seq)')) return new Response('{"seq":"0"}\n')
-    if (sql.startsWith('INSERT') && sql.includes('`event_dedup_versions`') && interrupt) {
-      interrupt = false; throw new Error('fixture-only', { cause: { code: 'ECONNRESET' } })
-    }
-    return new Response('')
-  })
+  t.mock.method(globalThis, 'fetch', async () => new Response(''))
   try {
     for (const timeout of [300000, 45000]) {
-      budgets.length = 0; requests.length = 0; interrupt = true
-      const offline = trackingAnalyticsConfig(config, timeout), client = new ClickHouseHttpClient(offline.clickhouse)
-      const backend = new ClickHouseBackend(root, offline)
+      budgets.length = 0
+      const client = new ClickHouseHttpClient(trackingAnalyticsConfig(config, timeout).clickhouse)
       try {
-        await initializeClickHouse(client)
-        await backend.open()
-        await backend.rows('users', { keys: ['["user"]'] })
-        const row = { tenant: 't', id: 'event', digest: 'fixture', received_at: new Date().toISOString() }
-        await assert.rejects(backend.commit([{ table: 'event_dedup', key: rowKey('event_dedup', row), row }]), /ANALYTICS_CONNECTION_RESET/)
-        await backend.recover()
-        assert.ok(requests.some(sql => sql.startsWith('CREATE')))
-        assert.ok(requests.some(sql => sql.startsWith('SELECT payload')))
-        assert.ok(requests.some(sql => sql.includes('argMax(payload,commit_seq)')))
-        assert.equal(requests.filter(sql => sql.startsWith('INSERT') && sql.includes('`tracking_commits`')).length, 2)
-        assert.equal(requests.filter(sql => sql.startsWith('INSERT') && sql.includes('`event_dedup_versions`')).length, 2)
-        assert.ok(requests.some(sql => sql.startsWith('INSERT') && sql.includes('`published_watermarks`')))
-        assert.ok(budgets.length > 20 && budgets.every(value => value > timeout - 1000 && value <= timeout))
-      } finally { backend.close(); client.close() }
+        await client.command('CREATE DATABASE fixture')
+        await client.query('SELECT * FROM fixture.users FINAL')
+        await client.insert('event_dedup', [{ tenant: 't', id: 'e', digest: 'fixture', received_at: null }])
+        assert.equal(budgets.length, 3)
+        assert.ok(budgets.every(value => value > timeout - 1000 && value <= timeout))
+      } finally { client.close() }
     }
-  } finally { delete process.env[variable]; await rm(root, { recursive: true, force: true }) }
+  } finally { delete process.env[variable] }
 })
 
 test('the package tracking command runs with a 16 GiB heap and reports the effective offline budgets', async () => {

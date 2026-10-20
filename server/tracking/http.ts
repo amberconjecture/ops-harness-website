@@ -26,6 +26,12 @@ export function createTrackingHandlers(store: TrackingStore, config: TrackingHtt
   const collect = async (req: IncomingMessage, res: ServerResponse, url: URL): Promise<boolean> => {
     if (!url.pathname.startsWith('/api/tracking/')) return false
     try {
+      if (url.pathname === '/api/tracking/ready') {
+        if (req.method !== 'GET') throw new GuideError('METHOD_NOT_ALLOWED', 405)
+        if (!config.enabled) throw new GuideError('TRACKING_NOT_ENABLED', 503)
+        await store.readiness()
+        json(res, { status: 'ok' }); return true
+      }
       if (req.method !== 'POST') throw new GuideError('METHOD_NOT_ALLOWED', 405)
       if (!config.enabled) throw new GuideError('TRACKING_NOT_ENABLED', 503)
       if (req.headers.origin || req.headers['sec-fetch-site']) throw new GuideError('HOST_UPLOAD_REQUIRED', 403)

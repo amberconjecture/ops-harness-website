@@ -316,7 +316,7 @@ GitHub 的 `Website checks` workflow 自动执行冻结安装、类型检查、�
 
 ## 运营统计
 
-运营数据仅使用 ClickHouse，服务端不保留 SQLite 运行路径。首次运行须配置 CH 环境凭据并执行 `pnpm tracking init`。已迁移后回退的生产库，停服后执行 `pnpm tracking backfill --sqlite /实际路径/analytics.sqlite --since '2026-10-18T10:00:00+08:00'`，将示例时间替换为补数起点，补齐该时间及之后的记录与必要关联数据，再启动新服务。`--since` 必填且必须带时区；无时间的身份、runtime 按关联选择，日汇总包含起点整天，无时间累计计数跳过。脚本只读 SQLite，不做全表摘要/API 对账；选中的坏行计数后跳过，支持重复执行。完整配置、各表时间规则、命令和恢复方式见 [ClickHouse 单库切换与补数](docs/runbooks/clickhouse-migration.md)，设计见 [ADR 0026](docs/adr/0026-clickhouse-tracking.md)。
+运营数据使用 ClickHouse 的 10 张类型化业务表，不再采用通用 key/payload 存储。全新部署执行 `pnpm tracking init`。旧库升级可保持旧实例在线：准备指向新数据库和新 analyticsDirectory 的独立配置，执行 `pnpm tracking upgrade --source-database 旧库名 --config 新配置`，首轮全量、随后重复执行增量追平。最后加 `--finalize`，启动新端口的实例、检查 `/api/tracking/ready`，在报告的 `cutoverDeadline` 前完成网关切换和旧请求排空，将未同步变更限制在 5 分钟内。新实例首次业务写入会再次校验时限，并禁止后续旧库导入；历史坏行和日志断档会阻止切换。官网启动及每小时按 90/120/400 天清理过期数据及 runtime 子记录，DDL 不配置 TTL。完整步骤见 [类型化升级与清理](docs/runbooks/tracking-typed-migration.md)，设计见 [ADR 0027](docs/adr/0027-typed-tracking-schema.md)。SQLite 仅作为显式离线补数来源，服务不打开 SQLite。
 
 `pnpm tracking` 默认设置 16 GiB Node 老生代堆上限；离线初始化/补数的 ClickHouse 单次请求与查询默认 5 分钟，可用 `--timeout-ms 300000` 显式指定，整次补数不设总时限。启动日志输出实际堆上限和超时预算。该设置不修改官网进程的内存和超时配置。
 
@@ -328,3 +328,9 @@ GitHub 的 `Website checks` workflow 自动执行冻结安装、类型检查、�
 运营统计支持“全部环境”，跨环境、跨平台的同一工号统一去重；页面不再提供平台筛选。没有工号的旧事件保留匿名，不补归当前登录者。
 
 WeLink 个人资料随事件上报后，用户明细、排名和操作明细显示姓名、工号与最小部门；悬浮或键盘聚焦部门可查看完整部门，个人详情另展示一级部门。资料按成功查询时间更新，旧客户端与离线补传不会清空或倒退已有资料。部署必须先升级并重启官网，再更新工作助手，详见运营统计部署手册。官网使用仅依赖 zod 的 `@dsh-ops/tracking-contract` 制品，不安装终端 tracking 插件。
+
+## 数据库 DDL 管理
+
+ClickHouse 当前 schema 与编号 migration 统一保存在 [`db/clickhouse`](db/README.md)，MySQL 使用独立预留目录。初始化读取 0003 类型化 SQL，构建同步到 `dist/db`；0001/0002 保留为历史基线。新增 migration 须同时补充已有库升级路径，不能仅添加 SQL 文件。
+
+将通用 JSON 实体表恢复为明确业务列的设计见 [ADR 0027](docs/adr/0027-typed-tracking-schema.md)，附 [SQL 评审快照与隔离验证](docs/design/tracking-v2/README.md)、[升级与回退步骤](docs/runbooks/tracking-typed-migration.md)。类型化读写、查询、恢复、定期清理及在线全量/增量升级 CLI 已实现；尚未对生产库执行升级。

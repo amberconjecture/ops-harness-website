@@ -1,5 +1,7 @@
 # ADR 0026：运营数据只使用 ClickHouse
 
+> 历史决定：2026-10-20 起由 [ADR 0027](0027-typed-tracking-schema.md) 替代。下文描述旧版本表后端，不再作为当前升级操作指南。
+
 状态：已实现，2026-10-18。基于 `common/main` 的服务行为；表结构和统计 SQL 参考 `origin/main` 的 `ff07b05`。
 
 ## 决定
@@ -29,3 +31,7 @@
 离线 CLI 通过 package 脚本设置 16 GiB Node 老生代堆上限；仅跨批保存有变化的用户 ID 映射。初始化、查询、写入与恢复默认采用每次请求 5 分钟预算，通过 `--timeout-ms` 调整，整体补数不设截止时间。该覆盖仅限 CLI 内存中的配置，不改变线上服务的 30 秒请求、60 秒查询及 120 秒 Worker 调用预算。保留写入超时后的待提交恢复机制。
 
 操作步骤见 [ClickHouse 单库切换与补数](../runbooks/clickhouse-migration.md)。
+
+## 数据库 DDL 管理
+
+ClickHouse 当前 schema 与编号 migration 统一保存在 [`db/clickhouse`](../../db/README.md)，MySQL 使用独立预留目录。初始化直接读取版本化 SQL，构建同步到 `dist/db`；执行顺序及现有接管行为不变。新增 migration 须同时补充已有库升级路径，不能仅添加 SQL 文件。

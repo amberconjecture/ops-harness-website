@@ -2,7 +2,7 @@ import { ZodError } from 'zod'
 import { ClickHouseHttpError, ClickHouseTransportError } from '../../server/tracking/clickhouse-errors.js'
 
 export type TrackingCommandContext = {
-  stage: 'arguments' | 'config' | 'lock' | 'init' | 'backfill'
+  stage: 'arguments' | 'config' | 'lock' | 'init' | 'backfill' | 'upgrade' | 'maintain'
   configPath?: string
 }
 

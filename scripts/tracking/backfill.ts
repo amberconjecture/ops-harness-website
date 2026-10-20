@@ -1,10 +1,9 @@
 // The only production import of node:sqlite: an offline, read-only source adapter.
 import { DatabaseSync, type StatementSync } from 'node:sqlite'
 import { statSync } from 'node:fs'
-import { TABLES, TABLE_META, canonical, normalizeRow, rowKey, type Change, type Row, type TableName } from '../../server/tracking/canonical.js'
+import { TABLES, TABLE_META, canonical, rowKey, type Change, type Row, type TableName } from '../../server/tracking/canonical.js'
 import type { ClickHouseBackend } from '../../server/tracking/clickhouse.js'
-import { INTEGER_COLUMNS, NULLABLE_COLUMNS } from '../../server/tracking/clickhouse-schema.js'
-import { dayAt } from '../../server/tracking/types.js'
+import { INTEGER_COLUMNS, typedRow } from '../../server/tracking/clickhouse-schema.js'
 import { parseBackfillSince } from './backfill-time.js'
 
 export type BackfillProgress = { table: TableName; read: number; written: number; unchanged: number; skipped: number; missingTable?: boolean; skipReason?: 'NO_TIME_COLUMN' }
@@ -37,8 +36,6 @@ function sourceFilters(schema: SourceSchema): Record<TableName, string> {
   const relatedUsers: string[] = []
   if (has('activity_facts', 'user_id')) relatedUsers.push(`SELECT f.user_id FROM activity_facts f WHERE f.user_id IS NOT NULL AND (${fact('f')})`)
   if (has('identity_sessions', 'user_id')) relatedUsers.push(`SELECT i.user_id FROM identity_sessions i WHERE i.user_id IS NOT NULL AND (${dated('identity_sessions', 'i', 'valid_from')})`)
-  const daily = (alias: string) => has('user_day', 'day') ? `${alias}.day >= substr(datetime(:since,'+8 hours'),1,10)` : '0'
-  if (has('user_day', 'user_id')) relatedUsers.push(`SELECT d.user_id FROM user_day d WHERE d.user_id IS NOT NULL AND (${daily('d')})`)
   const user = (alias: string) => `(${dated('users', alias, 'profile_updated_at')}${relatedUsers.length ? ` OR ${alias}.id IN (${relatedUsers.join(' UNION ')})` : ''})`
   const identityUsers = has('users', 'id') ? `SELECT u.id FROM users u WHERE ${user('u')}` : relatedUsers.join(' UNION ')
   return {
@@ -52,40 +49,27 @@ function sourceFilters(schema: SourceSchema): Record<TableName, string> {
     runtime_facts: has('runtime_facts', 'tenant', 'id') && has('activity_facts', 'tenant', 'id')
       ? `EXISTS (SELECT 1 FROM activity_facts f WHERE f.tenant=s.tenant AND f.id=s.id AND (${fact('f')}))` : '0',
     tracking_events: dated('tracking_events', 's', 'received_at'),
-    user_day: daily('s'),
     ingestion_health: '0',
   }
 }
 
 function* sourceBatches(statement: StatementSync, since: string, filtered: boolean, batchSize: number) {
   let batch: Row[] = []
+  statement.setReadBigInts(true)
   // Keep a single SQLite cursor: subqueries selecting related users are not rerun per page.
   for (const row of statement.iterate(filtered ? { ':since': since } : {})) {
-    batch.push(row as Row)
+    batch.push(Object.fromEntries(Object.entries(row).map(([column, value]) => [column,
+      typeof value === 'bigint' && INTEGER_COLUMNS.has(column) ? String(value) : value,
+    ])) as Row)
     if (batch.length === batchSize) { yield batch; batch = [] }
   }
   if (batch.length) yield batch
 }
 function sourceRow(table: TableName, value: Row): Row {
-  const row = normalizeRow(table, value)
-  for (const [column, item] of Object.entries(row)) {
-    if (INTEGER_COLUMNS.has(column) ? typeof item !== 'number' || item < 0 : typeof item !== 'string' && !(item === null && NULLABLE_COLUMNS.has(column))) throw new Error('INVALID_SOURCE_ROW')
-    if (['received_at', 'occurred_at', 'expires_at', 'valid_from'].includes(column) && (typeof item !== 'string' || !Number.isFinite(Date.parse(item)))) throw new Error('INVALID_SOURCE_TIME')
-    if (column === 'day' && (typeof item !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(item) || !Number.isFinite(Date.parse(item)))) throw new Error('INVALID_SOURCE_DAY')
-  }
+  const row = typedRow(table, value)
   if (table === 'operations') for (const field of ['accepted', 'terminal']) if (row[field] !== null && !Number.isFinite(Date.parse(String(JSON.parse(String(row[field])).occurredAt)))) throw new Error('INVALID_SOURCE_OPERATION')
   return row
 }
-function retained(table: TableName, row: Row, at: number) {
-  const before = (days: number) => new Date(at - days * 86400000).toISOString()
-  if (table === 'tracking_events') return String(row.received_at) >= before(90)
-  if (table === 'event_dedup') return String(row.received_at) >= before(120)
-  if (table === 'identity_sessions') return String(row.expires_at) >= before(120)
-  if (table === 'activity_facts' || table === 'user_day') return String(row.day) >= dayAt(at - 400 * 86400000)
-  if (table === 'operations') return String(JSON.parse(String(row.terminal ?? row.accepted)).occurredAt) >= before(120)
-  return true
-}
-
 /** Select rows since the inclusive cutoff and required context in SQLite, then write missing/changed keys in bounded chunks. */
 export async function backfillSqlite(file: string, target: Pick<ClickHouseBackend, 'rows' | 'commit'>, options: { since: string; batchSize?: number; progress?: (value: BackfillProgress) => void }) {
   const since = parseBackfillSince(options.since)
@@ -93,7 +77,7 @@ export async function backfillSqlite(file: string, target: Pick<ClickHouseBacken
   const batchSize = options.batchSize ?? 500
   if (!Number.isInteger(batchSize) || batchSize < 1 || batchSize > 2000) throw new Error('INVALID_BATCH_SIZE')
   const source = new DatabaseSync(file, { readOnly: true })
-  const mapping = new Map<string, string>(), report: BackfillProgress[] = [], at = Date.now()
+  const mapping = new Map<string, string>(), report: BackfillProgress[] = []
   try {
     source.exec('PRAGMA query_only=ON; BEGIN')
     const schema: SourceSchema = new Map()
@@ -119,7 +103,7 @@ export async function backfillSqlite(file: string, target: Pick<ClickHouseBacken
         for (const value of batch) {
           try {
             const row = sourceRow(table, value as Row)
-            if (retained(table, row, at)) rows.push(row); else counts.skipped++
+            rows.push(row)
           } catch { counts.skipped++ }
         }
         // Reuse an already migrated employee's ID even if the two writers created different UUIDs.
