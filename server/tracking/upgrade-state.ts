@@ -2,7 +2,7 @@ import { TABLES, type TableName } from './canonical.js'
 import { readPrivateJson } from './durable-file.js'
 
 export const MAX_CUTOVER_LAG_MS = 5 * 60 * 1000
-export type UpgradeCounts = { read: number; written: number; deleted: number; expired: number }
+export type UpgradeCounts = { read: number; written: number; deleted: number; expired: number; unchanged?: number }
 export type UpgradeTables = Partial<Record<TableName, UpgradeCounts>>
 export type UpgradePosition = { seq: number; observedAt: string }
 export type UpgradeRound = {
@@ -37,7 +37,8 @@ export function readUpgradeCheckpoint(file: string): UpgradeCheckpoint {
   const tables = (rows: UpgradeTables) => {
     if (!rows || typeof rows !== 'object') throw new Error('ANALYTICS_UPGRADE_INVALID_CHECKPOINT')
     for (const [table, counts] of Object.entries(rows)) {
-      if (!TABLES.includes(table as TableName) || !counts || ['read', 'written', 'deleted', 'expired'].some(key => !Number.isSafeInteger(counts[key as keyof UpgradeCounts]) || counts[key as keyof UpgradeCounts] < 0)) throw new Error('ANALYTICS_UPGRADE_INVALID_CHECKPOINT')
+      if (!TABLES.includes(table as TableName) || !counts || (['read', 'written', 'deleted', 'expired'] as const).some(key => !Number.isSafeInteger(counts[key]) || counts[key] < 0)) throw new Error('ANALYTICS_UPGRADE_INVALID_CHECKPOINT')
+      if (counts.unchanged !== undefined && (!Number.isSafeInteger(counts.unchanged) || counts.unchanged < 0)) throw new Error('ANALYTICS_UPGRADE_INVALID_CHECKPOINT')
     }
   }
   if (typeof value.binding !== 'string' || typeof value.target !== 'string' || !['copying', 'ready', 'armed', 'active'].includes(value.phase) || !Number.isSafeInteger(value.rounds) || value.rounds < 0) throw new Error('ANALYTICS_UPGRADE_INVALID_CHECKPOINT')

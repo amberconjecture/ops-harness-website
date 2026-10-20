@@ -1,6 +1,6 @@
 import path from 'node:path'
 import { existsSync } from 'node:fs'
-import { TABLES, hashCanonical, rowKey, type Change, type Row, type TableName } from '../../server/tracking/canonical.js'
+import { TABLES, canonical, hashCanonical, rowKey, type Change, type Row, type TableName } from '../../server/tracking/canonical.js'
 import { ClickHouseBackend, ClickHouseHttpClient, initializeClickHouse, grantTypedAccess } from '../../server/tracking/clickhouse.js'
 import { ENTITY_TABLES, identifier, qualified, keyFilter, typedRow } from '../../server/tracking/clickhouse-schema.js'
 import { atomicJson } from '../../server/tracking/durable-file.js'
@@ -13,7 +13,7 @@ import type { AnalyticsConfig } from '../../server/tracking/config.js'
 const DAY = 86400000
 type Version = { source_epoch: string; commit_seq: string; key: string; deleted: number; payload: string; payload_hash: string }
 type LegacyCommit = { epoch: string; seq: number; createdAt: string; versions: Partial<Record<TableName | 'user_day', Version[]>> }
-const countsFor = (tables: UpgradeTables, table: TableName) => tables[table] ??= { read: 0, written: 0, deleted: 0, expired: 0 }
+const countsFor = (tables: UpgradeTables, table: TableName) => tables[table] ??= { read: 0, written: 0, deleted: 0, expired: 0, unchanged: 0 }
 async function serverTime(client: ClickHouseHttpClient) { return timestamp((await client.query("SELECT now64(3,'UTC') AS observedAt"))[0]?.observedAt) }
 function expired(table: TableName, row: Row, at: string) {
   const cutoff = (days: number) => new Date(Date.parse(at) - days * DAY).toISOString()
@@ -94,8 +94,12 @@ export async function upgradeClickHouse(directory: string, config: AnalyticsConf
       tableIndex: 0, cursor: '', cursorSeq: checkpoint.applied?.seq ?? 0, tables: {},
     }
     checkpoint.phase = 'copying'; atomicJson(file, checkpoint)
-    await target.open(true)
     const round = checkpoint.round
+    options.progress?.({
+      stage: 'round_start', mode: round.mode, fromSeq: round.fromSeq, throughSeq: round.through.seq,
+      ...(round.mode === 'incremental' ? { appliedSeq: round.cursorSeq, remainingSeqUpperBound: round.through.seq - round.cursorSeq } : {}),
+    })
+    await target.open(true)
     let retentionWarningReported = false
     const ensureSource = async () => {
       if (hashCanonical(await lineage()) !== hashCanonical(origin)) throw new Error('ANALYTICS_UPGRADE_SOURCE_CHANGED')
@@ -154,7 +158,23 @@ export async function upgradeClickHouse(directory: string, config: AnalyticsConf
       }
       const batch = [...changes.values()]
       // The baseline target starts empty; tombstones/expired rows need no physical mutation.
-      const selected = round.mode === 'baseline' ? batch.filter(change => change.row) : batch
+      let selected = round.mode === 'baseline' ? batch.filter(change => change.row) : batch
+      if (round.mode === 'incremental') {
+        const unchanged = new Set<Change>()
+        for (const table of TABLES) {
+          const rows = selected.filter(change => change.table === table && change.row)
+          if (!rows.length) continue
+          const current = new Map((await target.rows(table, { keys: rows.map(change => change.key) }))
+            .map(row => [rowKey(table, row), canonical(row)]))
+          for (const change of rows) if (current.get(change.key) === canonical(change.row)) {
+            unchanged.add(change)
+            const counts = countsFor(round.tables, table)
+            counts.unchanged = (counts.unchanged ?? 0) + 1
+          }
+        }
+        // Keep all deletions: deleting an absent parent must still remove any runtime children.
+        selected = selected.filter(change => !unchanged.has(change))
+      }
       await target.commit(selected)
       for (const change of selected) if (change.row) countsFor(round.tables, change.table).written++
     }
@@ -200,7 +220,10 @@ export async function upgradeClickHouse(directory: string, config: AnalyticsConf
       const flush = async () => {
         await apply([...batch.values()])
         round.cursorSeq = cursor; atomicJson(file, checkpoint)
-        options.progress?.({ mode: round.mode, appliedSeq: cursor, throughSeq: round.through.seq, tables: round.tables })
+        options.progress?.({
+          stage: 'batch_complete', mode: round.mode, appliedSeq: cursor, throughSeq: round.through.seq,
+          remainingSeqUpperBound: round.through.seq - cursor, tables: round.tables,
+        })
         batch.clear(); scanned = 0
       }
       while (nextSequence(cursor, origin.excluded) <= round.through.seq) {

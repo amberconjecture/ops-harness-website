@@ -128,11 +128,80 @@ test('interrupted incremental commit resumes its original watermark even while t
   assert.equal(readUpgradeCheckpoint(f.checkpointFile).applied?.seq, 1)
   assert.equal(readUpgradeCheckpoint(f.checkpointFile).round?.through.seq, 2)
   const resumed = await f.sync()
-  assert.equal(resumed.throughSeq, 2); assert.equal(resumed.tables.ingestion_health?.written, 1)
+  assert.equal(resumed.throughSeq, 2); assert.equal(resumed.tables.ingestion_health?.written, 0)
+  assert.equal(resumed.tables.ingestion_health?.unchanged, 1, 'the recovered batch must not be inserted again by journal replay')
   assert.equal((await f.rows('ingestion_health'))[0]!.count, '7')
   const next = await f.sync()
   assert.equal(next.fromSeq, 2); assert.equal(next.throughSeq, 3)
   assert.equal((await f.rows('ingestion_health'))[0]!.count, '12')
+})
+
+test('unchanged incremental snapshots advance and resume without inserts while real updates still replace full rows', async t => {
+  const f = await fixture(t), at = new Date().toISOString()
+  const user = make('users', { id: 'u', tenant: 't', issuer: 'welink', subject: '001', display_name: 'initial', dept_name: 'old' })
+  const snapshot = [
+    user, make('users', { id: 'u2', tenant: 't', issuer: 'welink', subject: '002' }),
+    make('user_identities', { tenant: 't', issuer: 'welink', subject: '001', user_id: 'u' }),
+    make('installations', { tenant: 't', installation: 'i', environment: 'production', last_seen: at }),
+    make('identity_sessions', { ref: 's', tenant: 't', installation: 'i', user_id: 'u', valid_from: at, expires_at: at }),
+    make('event_dedup', { tenant: 't', id: 'e', digest: 'digest', received_at: at }),
+    make('operations', { tenant: 't', installation: 'i', operation: 'o', accepted: canonical({ occurredAt: at }) }),
+    make('activity_facts', { tenant: 't', id: 'e', user_id: 'u', installation: 'i', day: at.slice(0, 10), occurred_at: at, pending: 0 }),
+    make('runtime_facts', { tenant: 't', id: 'e', input_tokens: 7 }),
+    make('tracking_events', { tenant: 't', id: 'e', body: '{}', received_at: at }),
+    make('ingestion_health', { code: 'TEST', count: 1 }),
+  ]
+  await f.publish(1, snapshot); await f.sync()
+  await f.target.command(`SYSTEM STOP MERGES ${qualified(f.target.database, 'users')}`)
+  await f.publish(2, snapshot); await f.publish(3, snapshot)
+
+  const insert = ClickHouseHttpClient.prototype.insert, writes: string[] = []
+  t.mock.method(ClickHouseHttpClient.prototype, 'insert', async function (this: ClickHouseHttpClient, ...args: Parameters<typeof insert>) {
+    if (this.database === f.target.database) writes.push(args[0])
+    return insert.apply(this, args)
+  })
+  const query = ClickHouseHttpClient.prototype.query
+  let publishWhileCopying = true
+  t.mock.method(ClickHouseHttpClient.prototype, 'query', async function (this: ClickHouseHttpClient, ...args: Parameters<typeof query>) {
+    const rows = await query.apply(this, args)
+    if (publishWhileCopying && this.database === f.sourceDatabase && args[0].includes('`tracking_commits`')) {
+      publishWhileCopying = false
+      await f.publish(4, snapshot)
+    }
+    return rows
+  })
+  await assert.rejects(f.sync({ batchSize: 1, progress: row => {
+    const progress = row as { stage?: string; appliedSeq?: number }
+    if (progress.stage === 'batch_complete' && progress.appliedSeq === 2) throw new Error('SIMULATED_UNCHANGED_INTERRUPTION')
+  } }), /SIMULATED_UNCHANGED_INTERRUPTION/)
+  assert.equal(readUpgradeCheckpoint(f.checkpointFile).round?.cursorSeq, 2)
+
+  const progress: Record<string, unknown>[] = []
+  const resumed = await f.sync({ batchSize: 1, progress: row => progress.push(row as Record<string, unknown>) })
+  assert.equal(resumed.throughSeq, 3); assert.equal(resumed.phase, 'ready')
+  assert.deepEqual(progress[0], { stage: 'round_start', mode: 'incremental', fromSeq: 1, appliedSeq: 2, throughSeq: 3, remainingSeqUpperBound: 1 })
+  assert.equal(progress.at(-1)!.remainingSeqUpperBound, 0)
+  assert.deepEqual(writes, [])
+  for (const table of Object.keys(TABLE_META) as TableName[]) {
+    const expected = snapshot.filter(change => change.table === table).length * 2
+    assert.equal(resumed.tables[table]?.read, expected)
+    assert.equal(resumed.tables[table]?.unchanged, expected)
+    assert.equal(resumed.tables[table]?.written, 0)
+  }
+  const next = await f.sync()
+  assert.equal(next.fromSeq, 3); assert.equal(next.throughSeq, 4)
+  assert.deepEqual(writes, [])
+  assert.equal((await f.target.query(`SELECT count() AS n FROM ${qualified(f.target.database, 'users')}`))[0]!.n, '2')
+
+  const updated = { ...user, row: { ...user.row!, display_name: 'updated', dept_name: null } }
+  await f.publish(5, [updated]); await f.publish(6, [updated])
+  const changed = await f.sync({ batchSize: 1, finalize: true })
+  assert.equal(changed.phase, 'armed'); assert.equal(changed.throughSeq, 6)
+  assert.equal(changed.tables.users?.written, 1); assert.equal(changed.tables.users?.unchanged, 1)
+  assert.deepEqual(writes, ['users'])
+  const current = (await f.rows('users')).find(row => row.id === 'u')!
+  assert.equal(current.display_name, 'updated'); assert.equal(current.dept_name, null)
+  assert.equal((await f.target.query(`SELECT count() AS n FROM ${qualified(f.target.database, 'users')}`))[0]!.n, '3')
 })
 
 test('idle source can arm cutover, readiness does not activate, and stale first writes are refused', async t => {
